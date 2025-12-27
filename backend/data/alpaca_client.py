@@ -145,30 +145,46 @@ class AlpacaOptionsClient:
         self._set_state(ConnectionState.CONNECTING)
 
         try:
-            # Connect to WebSocket
+            # Connect to WebSocket (OPRA stream requires msgpack, no header auth)
             self._ws = await websockets.connect(
                 self.config.options_stream_url,
-                additional_headers={
-                    "APCA-API-KEY-ID": self.config.api_key,
-                    "APCA-API-SECRET-KEY": self.config.secret_key,
-                },
                 ping_interval=20,
                 ping_timeout=20,
             )
             logger.info(f"Connected to {self.config.options_stream_url}")
 
             # Wait for welcome message
-            self._set_state(ConnectionState.AUTHENTICATING)
             welcome = await self._receive()
-
             if not welcome:
                 raise ConnectionError("No welcome message received")
 
-            # Check for successful connection
-            # Alpaca sends [{"T":"success","msg":"connected"}]
-            if isinstance(welcome, list) and len(welcome) > 0:
-                msg = welcome[0]
-                if msg.get("T") == "success" and msg.get("msg") == "connected":
+            # Check for "connected" message
+            if not (isinstance(welcome, list) and len(welcome) > 0):
+                raise ConnectionError(f"Unexpected welcome message: {welcome}")
+
+            msg = welcome[0]
+            if msg.get("T") != "success" or msg.get("msg") != "connected":
+                raise ConnectionError(f"Unexpected welcome message: {welcome}")
+
+            logger.debug("Received connected message")
+
+            # Send explicit authentication (OPRA requires msgpack auth message)
+            self._set_state(ConnectionState.AUTHENTICATING)
+            auth_msg = {
+                "action": "auth",
+                "key": self.config.api_key,
+                "secret": self.config.secret_key,
+            }
+            await self._send(auth_msg)
+
+            # Wait for auth response
+            auth_response = await self._receive()
+            if not auth_response:
+                raise ConnectionError("No auth response received")
+
+            if isinstance(auth_response, list) and len(auth_response) > 0:
+                auth_result = auth_response[0]
+                if auth_result.get("T") == "success" and auth_result.get("msg") == "authenticated":
                     logger.info("Authentication successful")
                     self._set_state(ConnectionState.CONNECTED)
                     self._reconnect_attempts = 0
@@ -177,8 +193,10 @@ class AlpacaOptionsClient:
                     if self._subscribed_symbols:
                         await self._send_subscribe(list(self._subscribed_symbols))
                     return
+                elif auth_result.get("T") == "error":
+                    raise ConnectionError(f"Auth failed: {auth_result.get('msg')}")
 
-            raise ConnectionError(f"Unexpected welcome message: {welcome}")
+            raise ConnectionError(f"Unexpected auth response: {auth_response}")
 
         except Exception as e:
             self._set_state(ConnectionState.DISCONNECTED)
@@ -241,15 +259,19 @@ class AlpacaOptionsClient:
         logger.info(f"Unsubscribed from {len(symbols)} symbols")
 
     async def _send(self, data: dict) -> None:
-        """Send JSON message via WebSocket."""
+        """Send msgpack message via WebSocket.
+
+        Note: OPRA stream only accepts msgpack format, not JSON.
+        """
         if not self._ws:
             raise ConnectionError("WebSocket not connected")
 
-        import json
-        await self._ws.send(json.dumps(data))
+        await self._ws.send(msgpack.packb(data))
 
     async def _receive(self) -> list[dict] | None:
-        """Receive and decode a message.
+        """Receive and decode a msgpack message.
+
+        Note: OPRA stream only sends msgpack format.
 
         Returns:
             Decoded message (list of dicts) or None if connection closed
@@ -259,15 +281,7 @@ class AlpacaOptionsClient:
 
         try:
             raw = await self._ws.recv()
-
-            # Alpaca sends MsgPack-encoded messages
-            if isinstance(raw, bytes):
-                return msgpack.unpackb(raw, raw=False)
-            else:
-                # Fallback to JSON for text messages
-                import json
-                return json.loads(raw)
-
+            return msgpack.unpackb(raw, raw=False)
         except websockets.exceptions.ConnectionClosed:
             return None
 
