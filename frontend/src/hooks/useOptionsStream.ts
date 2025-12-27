@@ -12,11 +12,13 @@ const WS_URL = import.meta.env.PROD
 
 const RECONNECT_DELAY = 5000; // 5 seconds
 const PING_INTERVAL = 25000; // 25 seconds
+const DISCONNECT_GRACE_PERIOD = 3000; // Only show disconnected after 3 seconds
 
 export function useOptionsStream() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
   const pingIntervalRef = useRef<number | null>(null);
+  const disconnectGraceRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
 
   // Get store methods once (they're stable)
@@ -38,19 +40,37 @@ export function useOptionsStream() {
         clearTimeout(reconnectTimeoutRef.current);
         reconnectTimeoutRef.current = null;
       }
+      if (disconnectGraceRef.current) {
+        clearTimeout(disconnectGraceRef.current);
+        disconnectGraceRef.current = null;
+      }
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
       }
     };
 
-    const connect = () => {
+    const connect = (isInitial = false) => {
       if (!mountedRef.current) return;
 
-      // Clean up existing connection
-      cleanup();
+      // Clean up existing connection but keep grace timer running
+      if (pingIntervalRef.current) {
+        clearInterval(pingIntervalRef.current);
+        pingIntervalRef.current = null;
+      }
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
 
-      setConnectionStatus('connecting');
+      // Only show "connecting" on initial connection
+      if (isInitial) {
+        setConnectionStatus('connecting');
+      }
 
       try {
         const ws = new WebSocket(WS_URL);
@@ -58,6 +78,13 @@ export function useOptionsStream() {
 
         ws.onopen = () => {
           if (!mountedRef.current) return;
+
+          // Cancel grace period timer - we're connected
+          if (disconnectGraceRef.current) {
+            clearTimeout(disconnectGraceRef.current);
+            disconnectGraceRef.current = null;
+          }
+
           console.log('WebSocket connected');
           setConnectionStatus('connected');
 
@@ -72,7 +99,6 @@ export function useOptionsStream() {
         ws.onclose = (event) => {
           if (!mountedRef.current) return;
           console.log('WebSocket closed:', event.code, event.reason);
-          setConnectionStatus('disconnected');
 
           // Clear ping interval
           if (pingIntervalRef.current) {
@@ -80,9 +106,19 @@ export function useOptionsStream() {
             pingIntervalRef.current = null;
           }
 
+          // Start grace period timer - only show disconnected after delay
+          if (!disconnectGraceRef.current) {
+            disconnectGraceRef.current = window.setTimeout(() => {
+              if (mountedRef.current) {
+                setConnectionStatus('disconnected');
+              }
+              disconnectGraceRef.current = null;
+            }, DISCONNECT_GRACE_PERIOD);
+          }
+
           // Attempt reconnect only if still mounted
           if (mountedRef.current) {
-            reconnectTimeoutRef.current = window.setTimeout(connect, RECONNECT_DELAY);
+            reconnectTimeoutRef.current = window.setTimeout(() => connect(false), RECONNECT_DELAY);
           }
         };
 
@@ -144,7 +180,7 @@ export function useOptionsStream() {
       }
     };
 
-    connect();
+    connect(true); // Initial connection shows "connecting"
 
     return () => {
       mountedRef.current = false;
