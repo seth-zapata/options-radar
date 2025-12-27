@@ -2,10 +2,29 @@
  * Status bar showing connection status and data freshness.
  */
 
+import { useEffect, useState } from 'react';
 import { useOptionsStore } from '../store/optionsStore';
 
+function isMarketOpen(): boolean {
+  const now = new Date();
+  const etHour = now.getUTCHours() - 5; // Rough ET conversion
+  const weekday = now.getUTCDay();
+  return weekday >= 1 && weekday <= 5 && etHour >= 9 && etHour < 16;
+}
+
 export function StatusBar() {
-  const { connectionStatus, underlying, lastMessageTime } = useOptionsStore();
+  const { connectionStatus, underlying, lastMessageTime, options } = useOptionsStore();
+  const [marketOpen, setMarketOpen] = useState(isMarketOpen());
+
+  // Check market status every minute
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setMarketOpen(isMarketOpen());
+    }, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const optionsCount = options.size;
 
   const getConnectionColor = () => {
     switch (connectionStatus) {
@@ -39,6 +58,19 @@ export function StatusBar() {
       </div>
 
       <div className="flex items-center gap-6">
+        {/* Market Status */}
+        <div className="text-sm">
+          <span className={marketOpen ? 'text-green-400' : 'text-yellow-400'}>
+            {marketOpen ? 'Market Open' : 'Market Closed'}
+          </span>
+        </div>
+
+        {/* Options Count */}
+        <div className="text-sm">
+          <span className="text-slate-400">Options:</span>{' '}
+          <span>{optionsCount}</span>
+        </div>
+
         {/* IV Rank */}
         {underlying && (
           <div className="text-sm">

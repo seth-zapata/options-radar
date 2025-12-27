@@ -95,7 +95,11 @@ def underlying_to_dict(underlying: UnderlyingData) -> dict[str, Any]:
 
 async def on_option_update(option: AggregatedOptionData) -> None:
     """Callback when option data updates - broadcast to clients."""
-    await connection_manager.broadcast_option_update(option_to_dict(option))
+    try:
+        if connection_manager.connection_count > 0:
+            await connection_manager.broadcast_option_update(option_to_dict(option))
+    except Exception as e:
+        logger.error(f"Error broadcasting option update: {e}")
 
 
 async def on_underlying_update(underlying: UnderlyingData) -> None:
@@ -192,9 +196,23 @@ async def lifespan(app: FastAPI):
     aggregator.on_option_update = sync_option_callback
     aggregator.on_underlying_update = sync_underlying_callback
 
+    # Quote counter for logging
+    quote_count = [0]
+
+    def on_quote_received(quote):
+        """Log and forward quotes to aggregator."""
+        quote_count[0] += 1
+        if quote_count[0] <= 5 or quote_count[0] % 100 == 0:
+            logger.info(
+                f"Quote #{quote_count[0]}: {quote.canonical_id.underlying} "
+                f"{quote.canonical_id.strike}{quote.canonical_id.right} "
+                f"Bid: ${quote.bid:.2f} Ask: ${quote.ask:.2f}"
+            )
+        aggregator.update_quote(quote)
+
     alpaca_client = AlpacaOptionsClient(
         config=config.alpaca,
-        on_quote=aggregator.update_quote,
+        on_quote=on_quote_received,
         on_state_change=lambda state: logger.info(f"Alpaca state: {state.value}"),
     )
 
@@ -272,13 +290,26 @@ app.add_middleware(
 )
 
 
+def is_market_open() -> bool:
+    """Check if US options market is likely open."""
+    now = datetime.now(timezone.utc)
+    # Convert to ET (UTC-5 or UTC-4 for DST)
+    # Simplified: market is 9:30 AM - 4:00 PM ET, Mon-Fri
+    et_hour = (now.hour - 5) % 24  # Rough ET conversion
+    weekday = now.weekday()
+    return weekday < 5 and 9 <= et_hour < 16
+
+
 @app.get("/health")
 async def health_check() -> dict[str, Any]:
     """Health check endpoint."""
+    options_count = aggregator.quote_count if aggregator else 0
     return {
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "connections": connection_manager.connection_count,
+        "optionsCount": options_count,
+        "marketOpen": is_market_open(),
         "alpaca_connected": alpaca_client is not None,
         "orats_configured": orats_client is not None,
     }

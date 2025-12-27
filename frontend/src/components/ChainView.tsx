@@ -163,9 +163,11 @@ export function ChainView() {
 
   if (expiries.length === 0) {
     return (
-      <div className="p-8 text-center text-slate-500">
-        <p className="text-lg">Waiting for options data...</p>
-        <p className="text-sm mt-2">Make sure the backend server is running.</p>
+      <div className="p-8 text-center text-slate-500 bg-white rounded-lg shadow">
+        <p className="text-lg font-medium">Waiting for options data...</p>
+        <p className="text-sm mt-2">If the market is closed, no quotes will be received.</p>
+        <p className="text-sm mt-1">US Options Market: Mon-Fri, 9:30 AM - 4:00 PM ET</p>
+        <p className="text-xs mt-4 text-slate-400">Backend connected and subscribed to NVDA options.</p>
       </div>
     );
   }
