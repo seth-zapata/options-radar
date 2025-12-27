@@ -57,6 +57,16 @@ _background_tasks: set[asyncio.Task] = set()
 def option_to_dict(option: AggregatedOptionData) -> dict[str, Any]:
     """Convert AggregatedOptionData to JSON-serializable dict."""
     now = datetime.now(timezone.utc)
+
+    # Serialize timestamps to ISO strings
+    quote_ts = option.quote_timestamp
+    if isinstance(quote_ts, datetime):
+        quote_ts = quote_ts.isoformat()
+
+    greeks_ts = option.greeks_timestamp
+    if isinstance(greeks_ts, datetime):
+        greeks_ts = greeks_ts.isoformat()
+
     return {
         "canonicalId": {
             "underlying": option.canonical_id.underlying,
@@ -78,8 +88,8 @@ def option_to_dict(option: AggregatedOptionData) -> dict[str, Any]:
         "vega": option.vega,
         "iv": option.iv,
         "theoreticalValue": option.theoretical_value,
-        "quoteTimestamp": option.quote_timestamp,
-        "greeksTimestamp": option.greeks_timestamp,
+        "quoteTimestamp": quote_ts,
+        "greeksTimestamp": greeks_ts,
         "quoteAge": option.quote_age_seconds(now),
         "greeksAge": option.greeks_age_seconds(now),
     }
