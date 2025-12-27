@@ -57,9 +57,9 @@ export interface AbstainData {
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
 
 export interface WebSocketMessage {
-  type: 'option_update' | 'underlying_update' | 'gate_status' | 'abstain' | 'connection_status' | 'error';
-  data: unknown;
-  timestamp: string;
+  type: 'option_update' | 'underlying_update' | 'gate_status' | 'abstain' | 'connection_status' | 'error' | 'ping';
+  data?: unknown;
+  timestamp?: string;
 }
 
 // Helper to create option key for Map

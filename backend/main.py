@@ -339,6 +339,9 @@ async def get_market_status() -> dict[str, Any]:
             "nextOpen": info["next_open"],
             "nextClose": info["next_close"],
             "timeUntilOpen": info["time_until_open"],
+            "timeUntilClose": info["time_until_close"],
+            "secondsUntilOpen": info["seconds_until_open"],
+            "secondsUntilClose": info["seconds_until_close"],
             "timezone": "Central Time",
         }
     except Exception as e:
@@ -436,11 +439,22 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     }
                 )
 
-        # Keep connection alive and handle client messages
+        # Keep connection alive with ping/pong and handle client messages
         while True:
-            data = await websocket.receive_text()
-            # Handle client messages (subscribe/unsubscribe) here if needed
-            logger.debug(f"Received from client: {data}")
+            try:
+                # Wait for message with timeout, send ping if timeout
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                # Handle client messages
+                if data == "ping":
+                    await websocket.send_text("pong")
+                else:
+                    logger.debug(f"Received from client: {data}")
+            except asyncio.TimeoutError:
+                # Send ping to keep connection alive
+                try:
+                    await websocket.send_text('{"type":"ping"}')
+                except Exception:
+                    break  # Connection dead
 
     except WebSocketDisconnect:
         connection_manager.disconnect(websocket)
