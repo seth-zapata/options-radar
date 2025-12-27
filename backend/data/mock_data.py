@@ -224,13 +224,13 @@ class MockDataGenerator:
         """Generate initial options chain snapshot."""
         now = datetime.now(timezone.utc)
 
-        # Create underlying data
+        # Create underlying data (timestamp must be ISO string for age_seconds())
         underlying = UnderlyingData(
             symbol="NVDA",
             price=self._underlying_price,
             iv_rank=random.uniform(25, 75),
             iv_percentile=random.uniform(30, 70),
-            timestamp=now,
+            timestamp=now.isoformat(),
         )
 
         # Generate options
@@ -348,7 +348,7 @@ class MockDataGenerator:
                         price=self._underlying_price,
                         iv_rank=random.uniform(25, 75),
                         iv_percentile=random.uniform(30, 70),
-                        timestamp=now,
+                        timestamp=now.isoformat(),
                     )
                     self.on_underlying_update(underlying)
 
@@ -390,5 +390,5 @@ class MockDataGenerator:
             price=self._underlying_price,
             iv_rank=50.0,
             iv_percentile=50.0,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(timezone.utc).isoformat(),
         )
