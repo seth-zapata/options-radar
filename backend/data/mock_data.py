@@ -353,9 +353,18 @@ class MockDataGenerator:
                     self.on_underlying_update(underlying)
 
                 # Update a random subset of options (simulates market activity)
+                # Always include ATM options to keep them fresh for gate evaluation
                 keys = list(self._options.keys())
-                num_updates = random.randint(5, 20)
-                update_keys = random.sample(keys, min(num_updates, len(keys)))
+
+                # Find ATM strike
+                atm_strike = round(self._underlying_price / 2.5) * 2.5
+                atm_keys = [k for k in keys if f"-{atm_strike}-" in k]
+
+                # Random subset plus ATM options
+                num_updates = random.randint(10, 30)
+                other_keys = [k for k in keys if k not in atm_keys]
+                random_keys = random.sample(other_keys, min(num_updates, len(other_keys)))
+                update_keys = list(set(atm_keys + random_keys))
 
                 for key in update_keys:
                     state = self._options[key]
