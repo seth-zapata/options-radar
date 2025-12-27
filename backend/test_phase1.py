@@ -88,15 +88,18 @@ async def test_alpaca_connection() -> bool:
 
         logger.info(f"  Subscribed to {sub_manager.subscribed_count} contracts")
         logger.info(f"  ATM strike: ${sub_manager.current_atm}")
-        logger.info("  Waiting 5 seconds for quotes...")
+        logger.info("  Waiting up to 5 seconds for quotes (market may be closed)...")
 
-        # Wait for quotes
-        start = asyncio.get_event_loop().time()
-        async for _ in client.messages():
-            if asyncio.get_event_loop().time() - start > 5:
-                break
-            if len(quotes_received) >= 10:
-                break
+        # Wait for quotes with timeout (market might be closed)
+        try:
+            async def wait_for_quotes():
+                async for _ in client.messages():
+                    if len(quotes_received) >= 5:
+                        break
+
+            await asyncio.wait_for(wait_for_quotes(), timeout=5.0)
+        except asyncio.TimeoutError:
+            pass  # Expected if market is closed
 
         logger.info(f"  Received {len(quotes_received)} quotes")
 

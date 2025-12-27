@@ -249,8 +249,8 @@ class ORATSClient:
         return UnderlyingData(
             symbol=ticker,
             price=0.0,  # IV rank endpoint doesn't include price
-            iv_rank=item.get("ivRank1y", item.get("ivRank1m", 0.0)) * 100,  # Convert to 0-100
-            iv_percentile=item.get("ivPct1y", item.get("ivPct1m", 0.0)) * 100,
+            iv_rank=item.get("ivRank1y", item.get("ivRank1m", 0.0)),  # Already 0-100
+            iv_percentile=item.get("ivPct1y", item.get("ivPct1m", 0.0)),  # Already 0-100
             timestamp=item.get("updatedAt", timestamp),
         )
 
