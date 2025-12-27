@@ -24,7 +24,7 @@ from typing import Any
 
 import msgpack
 import websockets
-from websockets.client import WebSocketClientProtocol
+from websockets.asyncio.client import ClientConnection
 
 from backend.config import AlpacaConfig
 from backend.models.canonical import CanonicalOptionId, parse_alpaca
@@ -98,7 +98,7 @@ class AlpacaOptionsClient:
     reconnect_max_delay: float = 60.0
 
     # Internal state
-    _ws: WebSocketClientProtocol | None = field(default=None, init=False)
+    _ws: ClientConnection | None = field(default=None, init=False)
     _state: ConnectionState = field(default=ConnectionState.DISCONNECTED, init=False)
     _subscribed_symbols: set[str] = field(default_factory=set, init=False)
     _reconnect_attempts: int = field(default=0, init=False)
@@ -148,12 +148,12 @@ class AlpacaOptionsClient:
             # Connect to WebSocket
             self._ws = await websockets.connect(
                 self.config.options_stream_url,
-                extra_headers={
+                additional_headers={
                     "APCA-API-KEY-ID": self.config.api_key,
                     "APCA-API-SECRET-KEY": self.config.secret_key,
                 },
-                ping_interval=30,
-                ping_timeout=10,
+                ping_interval=20,
+                ping_timeout=20,
             )
             logger.info(f"Connected to {self.config.options_stream_url}")
 
@@ -268,7 +268,7 @@ class AlpacaOptionsClient:
                 import json
                 return json.loads(raw)
 
-        except websockets.ConnectionClosed:
+        except websockets.exceptions.ConnectionClosed:
             return None
 
     async def messages(self) -> AsyncIterator[None]:
