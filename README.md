@@ -63,6 +63,46 @@ TEST: Alpaca WebSocket Connection
   ✅ Alpaca connection: PASSED
 ```
 
+## Testing Phase 2 (Gating Engine)
+
+Run the Phase 2 integration test:
+
+```bash
+source venv/bin/activate
+python -m backend.test_phase2
+```
+
+This tests:
+- Gate framework (8 hard gates, 3 soft gates)
+- Pipeline orchestration (5 stages)
+- Abstain generation with reasons
+- Confidence capping from soft failures
+- Integration with Phase 1 data aggregator
+
+**Expected output:**
+```
+TEST: Basic Gate Evaluation
+  Hard gates: 8
+  Soft gates: 3
+  Quote gate (2s): True - OK
+  Quote gate (10s): False - Quote data stale (10.0s > 5.0s)
+  ...
+  Basic gate evaluation: PASSED
+
+TEST: Pipeline - All Gates Pass
+  Pipeline passed: True
+  Stage reached: explain
+  Confidence cap: 100%
+  Pipeline pass scenario: PASSED
+
+TEST: Pipeline - Abstain on Stale Data
+  Abstain reason: STALE_DATA
+  Resume condition: Quote must update within 5s
+  Pipeline abstain scenario: PASSED
+
+Phase 2 tests completed successfully!
+```
+
 ## Quick Demo (Quote Streaming)
 
 ```bash
@@ -106,7 +146,7 @@ options-radar/
 ## Development Phases
 
 - [x] **Phase 1: Data Foundation** - Canonical IDs, Alpaca streaming, ORATS client, aggregator
-- [ ] **Phase 2: Gating Engine** - Gate framework, pipeline, abstain generation
+- [x] **Phase 2: Gating Engine** - Gate framework, pipeline, abstain generation
 - [ ] **Phase 3: MVP UI** - FastAPI WebSocket, React chain view
 - [ ] **Phase 4: Recommendation Logic** - Strike selection, position sizing
 - [ ] **Phase 5: Evaluation** - Shadow mode logging, metrics
