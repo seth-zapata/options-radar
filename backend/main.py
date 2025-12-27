@@ -173,7 +173,7 @@ async def gate_evaluation_loop() -> None:
             # Broadcast gate status
             await connection_manager.broadcast_gate_status(gate_results)
 
-            # Broadcast abstain if applicable
+            # Broadcast abstain status (null clears previous abstain)
             if result.abstain:
                 await connection_manager.broadcast_abstain({
                     "reason": result.abstain.reason.value,
@@ -183,6 +183,9 @@ async def gate_evaluation_loop() -> None:
                         for g in result.all_results if not g.passed
                     ],
                 })
+            else:
+                # All gates passed - clear abstain
+                await connection_manager.broadcast_abstain(None)
 
         except asyncio.CancelledError:
             logger.info("Gate evaluation loop cancelled")

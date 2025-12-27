@@ -232,11 +232,12 @@ class MockDataGenerator:
         now = datetime.now(timezone.utc)
 
         # Create underlying data (timestamp must be ISO string for age_seconds())
+        # IV rank < 50 is favorable for buying premium (passes iv_rank_appropriate gate)
         underlying = UnderlyingData(
             symbol="NVDA",
             price=self._underlying_price,
-            iv_rank=random.uniform(25, 75),
-            iv_percentile=random.uniform(30, 70),
+            iv_rank=random.uniform(30, 45),  # Keep in favorable range for BUY actions
+            iv_percentile=random.uniform(30, 50),
             timestamp=now.isoformat(),
         )
 
@@ -355,8 +356,8 @@ class MockDataGenerator:
                     underlying = UnderlyingData(
                         symbol="NVDA",
                         price=self._underlying_price,
-                        iv_rank=random.uniform(25, 75),
-                        iv_percentile=random.uniform(30, 70),
+                        iv_rank=random.uniform(30, 45),  # Keep in favorable range
+                        iv_percentile=random.uniform(30, 50),
                         timestamp=now.isoformat(),
                     )
                     self.on_underlying_update(underlying)
@@ -406,7 +407,7 @@ class MockDataGenerator:
         return UnderlyingData(
             symbol="NVDA",
             price=self._underlying_price,
-            iv_rank=50.0,
-            iv_percentile=50.0,
+            iv_rank=40.0,  # Favorable for buying premium
+            iv_percentile=45.0,
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
