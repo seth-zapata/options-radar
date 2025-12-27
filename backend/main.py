@@ -122,6 +122,76 @@ async def on_underlying_update(underlying: UnderlyingData) -> None:
     await connection_manager.broadcast_underlying_update(underlying_to_dict(underlying))
 
 
+async def gate_evaluation_loop() -> None:
+    """Background task to periodically evaluate gates and broadcast results."""
+    global mock_generator, aggregator
+
+    logger.info("Starting gate evaluation loop (5s interval)")
+
+    while True:
+        try:
+            await asyncio.sleep(5)  # Evaluate every 5 seconds
+
+            # Get options and underlying
+            if mock_generator:
+                options = mock_generator.get_all_options()
+                underlying = mock_generator.get_underlying()
+            elif aggregator:
+                options = aggregator.get_all_options()
+                underlying = aggregator.get_underlying("NVDA")
+            else:
+                continue
+
+            if not options or not underlying:
+                continue
+
+            # Find ATM option (closest to underlying price)
+            atm_option = min(
+                options,
+                key=lambda o: abs(o.canonical_id.strike - underlying.price)
+            )
+
+            # Evaluate gates
+            result = evaluate_option_for_signal(
+                option=atm_option,
+                underlying=underlying,
+                action="BUY_CALL" if atm_option.canonical_id.right == "C" else "BUY_PUT",
+            )
+
+            # Format gate results for frontend
+            gate_results = [
+                {
+                    "name": g.gate_name,
+                    "passed": g.passed,
+                    "value": g.value,
+                    "threshold": g.threshold,
+                    "message": g.message,
+                }
+                for g in result.all_results
+            ]
+
+            # Broadcast gate status
+            await connection_manager.broadcast_gate_status(gate_results)
+
+            # Broadcast abstain if applicable
+            if result.abstain:
+                await connection_manager.broadcast_abstain({
+                    "reason": result.abstain.reason.value,
+                    "resumeCondition": result.abstain.resume_condition,
+                    "failedGates": [
+                        {"name": g.gate_name, "message": g.message}
+                        for g in result.all_results if not g.passed
+                    ],
+                })
+
+        except asyncio.CancelledError:
+            logger.info("Gate evaluation loop cancelled")
+            break
+        except Exception as e:
+            logger.error(f"Error in gate evaluation: {e}")
+            await asyncio.sleep(5)
+
+
 async def greeks_polling_loop() -> None:
     """Background task to poll ORATS for Greeks updates."""
     global orats_client, aggregator, subscription_manager
@@ -220,6 +290,11 @@ async def lifespan(app: FastAPI):
 
         # Start streaming updates
         task = asyncio.create_task(mock_generator.start_streaming())
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+
+        # Start gate evaluation loop
+        task = asyncio.create_task(gate_evaluation_loop())
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
 
@@ -332,6 +407,11 @@ async def lifespan(app: FastAPI):
         task = asyncio.create_task(greeks_polling_loop())
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
+
+    # Start gate evaluation loop
+    task = asyncio.create_task(gate_evaluation_loop())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
     logger.info("OptionsRadar server ready")
 

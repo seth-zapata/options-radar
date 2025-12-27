@@ -183,14 +183,14 @@ def create_mock_option(
         bid_size=random.randint(10, 500),
         ask_size=random.randint(10, 500),
         last=round((bid + ask) / 2, 2),
-        quote_timestamp=now,
+        quote_timestamp=now.isoformat(),  # Must be ISO string for age_seconds()
         delta=delta,
         gamma=gamma,
         theta=theta,
         vega=vega,
         iv=iv,
         theoretical_value=theo_price,
-        greeks_timestamp=now,
+        greeks_timestamp=now.isoformat(),  # Must be ISO string for age_seconds()
     )
 
 
@@ -307,7 +307,7 @@ class MockDataGenerator:
             bid_size=random.randint(10, 500),
             ask_size=random.randint(10, 500),
             last=round((bid + ask) / 2, 2),
-            quote_timestamp=now,
+            quote_timestamp=now.isoformat(),  # Must be ISO string
             delta=delta,
             gamma=option.gamma,  # Keep gamma/theta/vega stable
             theta=option.theta,
