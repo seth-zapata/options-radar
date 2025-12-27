@@ -324,7 +324,7 @@ class MockDataGenerator:
             vega=option.vega,
             iv=iv,
             theoretical_value=theo_price,
-            greeks_timestamp=option.greeks_timestamp,
+            greeks_timestamp=now.isoformat(),  # Update greeks timestamp too
         )
 
         state.option = updated
