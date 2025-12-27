@@ -2,6 +2,7 @@
 
 from backend.data.aggregator import AggregatedOptionData, DataAggregator
 from backend.data.alpaca_client import AlpacaOptionsClient, ConnectionState
+from backend.data.market_hours import MarketStatus, check_market_hours, CT, ET
 from backend.data.orats_client import ORATSClient
 from backend.data.staleness import (
     FreshnessLevel,
@@ -15,11 +16,15 @@ __all__ = [
     "AggregatedOptionData",
     "AlpacaOptionsClient",
     "ConnectionState",
+    "CT",
     "DataAggregator",
+    "ET",
     "FreshnessLevel",
     "FreshnessReport",
+    "MarketStatus",
     "ORATSClient",
     "StalenessChecker",
     "StalenessThresholds",
     "SubscriptionManager",
+    "check_market_hours",
 ]

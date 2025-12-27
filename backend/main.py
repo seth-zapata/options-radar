@@ -181,6 +181,26 @@ async def lifespan(app: FastAPI):
         yield
         return
 
+    # Check market hours before connecting
+    from backend.data.market_hours import check_market_hours, CT
+
+    try:
+        market_status = await check_market_hours(config.alpaca)
+        info = market_status.format_for_timezone(CT)
+
+        logger.info(f"Current time (CT): {info['current_time']}")
+
+        if not market_status.is_open:
+            logger.warning("=" * 60)
+            logger.warning("MARKET IS CLOSED")
+            logger.warning(f"  {info['time_until_open']}")
+            logger.warning(f"  Next open: {info['next_open']}")
+            logger.warning("  No quotes will be received until market opens.")
+            logger.warning("  Server will stay running for UI testing.")
+            logger.warning("=" * 60)
+    except Exception as e:
+        logger.warning(f"Could not check market hours: {e}")
+
     # Initialize aggregator
     aggregator = DataAggregator(config=config)
 
@@ -290,16 +310,6 @@ app.add_middleware(
 )
 
 
-def is_market_open() -> bool:
-    """Check if US options market is likely open."""
-    now = datetime.now(timezone.utc)
-    # Convert to ET (UTC-5 or UTC-4 for DST)
-    # Simplified: market is 9:30 AM - 4:00 PM ET, Mon-Fri
-    et_hour = (now.hour - 5) % 24  # Rough ET conversion
-    weekday = now.weekday()
-    return weekday < 5 and 9 <= et_hour < 16
-
-
 @app.get("/health")
 async def health_check() -> dict[str, Any]:
     """Health check endpoint."""
@@ -309,10 +319,33 @@ async def health_check() -> dict[str, Any]:
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "connections": connection_manager.connection_count,
         "optionsCount": options_count,
-        "marketOpen": is_market_open(),
         "alpaca_connected": alpaca_client is not None,
         "orats_configured": orats_client is not None,
     }
+
+
+@app.get("/api/market")
+async def get_market_status() -> dict[str, Any]:
+    """Get current market status from Alpaca."""
+    from backend.data.market_hours import check_market_hours, CT
+
+    try:
+        config = load_config()
+        status = await check_market_hours(config.alpaca)
+        info = status.format_for_timezone(CT)
+        return {
+            "isOpen": status.is_open,
+            "currentTime": info["current_time"],
+            "nextOpen": info["next_open"],
+            "nextClose": info["next_close"],
+            "timeUntilOpen": info["time_until_open"],
+            "timezone": "Central Time",
+        }
+    except Exception as e:
+        return {
+            "error": str(e),
+            "isOpen": None,
+        }
 
 
 @app.get("/api/options")

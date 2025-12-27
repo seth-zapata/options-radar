@@ -5,22 +5,37 @@
 import { useEffect, useState } from 'react';
 import { useOptionsStore } from '../store/optionsStore';
 
-function isMarketOpen(): boolean {
-  const now = new Date();
-  const etHour = now.getUTCHours() - 5; // Rough ET conversion
-  const weekday = now.getUTCDay();
-  return weekday >= 1 && weekday <= 5 && etHour >= 9 && etHour < 16;
+interface MarketInfo {
+  isOpen: boolean;
+  currentTime: string;
+  nextOpen: string;
+  timeUntilOpen: string;
 }
 
 export function StatusBar() {
   const { connectionStatus, underlying, lastMessageTime, options } = useOptionsStore();
-  const [marketOpen, setMarketOpen] = useState(isMarketOpen());
+  const [marketInfo, setMarketInfo] = useState<MarketInfo | null>(null);
 
-  // Check market status every minute
+  // Fetch market status from API
   useEffect(() => {
-    const interval = setInterval(() => {
-      setMarketOpen(isMarketOpen());
-    }, 60000);
+    const fetchMarketStatus = async () => {
+      try {
+        const response = await fetch('/api/market');
+        const data = await response.json();
+        setMarketInfo({
+          isOpen: data.isOpen,
+          currentTime: data.currentTime,
+          nextOpen: data.nextOpen,
+          timeUntilOpen: data.timeUntilOpen,
+        });
+      } catch (error) {
+        console.error('Failed to fetch market status:', error);
+      }
+    };
+
+    fetchMarketStatus();
+    // Refresh every minute
+    const interval = setInterval(fetchMarketStatus, 60000);
     return () => clearInterval(interval);
   }, []);
 
@@ -60,9 +75,16 @@ export function StatusBar() {
       <div className="flex items-center gap-6">
         {/* Market Status */}
         <div className="text-sm">
-          <span className={marketOpen ? 'text-green-400' : 'text-yellow-400'}>
-            {marketOpen ? 'Market Open' : 'Market Closed'}
-          </span>
+          {marketInfo ? (
+            <span
+              className={marketInfo.isOpen ? 'text-green-400' : 'text-yellow-400'}
+              title={marketInfo.isOpen ? `Closes at market close` : `Opens: ${marketInfo.nextOpen}`}
+            >
+              {marketInfo.isOpen ? 'Market Open' : marketInfo.timeUntilOpen}
+            </span>
+          ) : (
+            <span className="text-slate-400">Loading...</span>
+          )}
         </div>
 
         {/* Options Count */}
