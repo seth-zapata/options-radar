@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -24,11 +25,14 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import load_config
-from backend.data import AlpacaOptionsClient, DataAggregator, ORATSClient, SubscriptionManager
+from backend.data import AlpacaOptionsClient, DataAggregator, MockDataGenerator, ORATSClient, SubscriptionManager
 from backend.data.aggregator import AggregatedOptionData
 from backend.engine import GatingPipeline, PortfolioState, evaluate_option_for_signal
 from backend.models.market_data import UnderlyingData
 from backend.websocket import ConnectionManager
+
+# Check for mock mode
+MOCK_MODE = os.environ.get("MOCK_DATA", "").lower() in ("true", "1", "yes")
 
 # Configure logging
 logging.basicConfig(
@@ -44,6 +48,7 @@ aggregator: DataAggregator | None = None
 alpaca_client: AlpacaOptionsClient | None = None
 orats_client: ORATSClient | None = None
 subscription_manager: SubscriptionManager | None = None
+mock_generator: MockDataGenerator | None = None
 
 # Background tasks
 _background_tasks: set[asyncio.Task] = set()
@@ -169,10 +174,63 @@ async def alpaca_message_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan - startup and shutdown."""
-    global aggregator, alpaca_client, orats_client, subscription_manager
+    global aggregator, alpaca_client, orats_client, subscription_manager, mock_generator
 
     logger.info("Starting OptionsRadar server...")
 
+    # Check for mock mode
+    if MOCK_MODE:
+        logger.info("=" * 60)
+        logger.info("MOCK DATA MODE ENABLED")
+        logger.info("  Using simulated NVDA options data")
+        logger.info("  Set MOCK_DATA=false to use real market data")
+        logger.info("=" * 60)
+
+        # Set up mock data callbacks
+        def mock_option_callback(option: AggregatedOptionData) -> None:
+            asyncio.create_task(on_option_update(option))
+
+        def mock_underlying_callback(underlying: UnderlyingData) -> None:
+            asyncio.create_task(on_underlying_update(underlying))
+
+        mock_generator = MockDataGenerator(
+            on_option_update=mock_option_callback,
+            on_underlying_update=mock_underlying_callback,
+            update_interval=1.0,  # Update every second
+        )
+
+        # Generate initial data
+        underlying, options = mock_generator.generate_initial_chain()
+        logger.info(f"Generated {len(options)} mock options")
+
+        # Send initial data to any connected clients
+        mock_underlying_callback(underlying)
+        for option in options:
+            mock_option_callback(option)
+
+        # Start streaming updates
+        task = asyncio.create_task(mock_generator.start_streaming())
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+
+        logger.info("OptionsRadar server ready (MOCK MODE)")
+
+        yield
+
+        # Shutdown mock mode
+        logger.info("Shutting down OptionsRadar server...")
+        mock_generator.stop_streaming()
+
+        for task in _background_tasks:
+            task.cancel()
+
+        if _background_tasks:
+            await asyncio.gather(*_background_tasks, return_exceptions=True)
+
+        logger.info("Shutdown complete")
+        return
+
+    # Real mode - connect to Alpaca/ORATS
     try:
         config = load_config()
     except ValueError as e:
@@ -313,12 +371,24 @@ app.add_middleware(
 @app.get("/health")
 async def health_check() -> dict[str, Any]:
     """Health check endpoint."""
+    if mock_generator:
+        return {
+            "status": "healthy",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "connections": connection_manager.connection_count,
+            "optionsCount": mock_generator.option_count,
+            "mockMode": True,
+            "alpaca_connected": False,
+            "orats_configured": False,
+        }
+
     options_count = aggregator.quote_count if aggregator else 0
     return {
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "connections": connection_manager.connection_count,
         "optionsCount": options_count,
+        "mockMode": False,
         "alpaca_connected": alpaca_client is not None,
         "orats_configured": orats_client is not None,
     }
@@ -354,6 +424,15 @@ async def get_market_status() -> dict[str, Any]:
 @app.get("/api/options")
 async def get_options() -> dict[str, Any]:
     """Get current snapshot of all options data."""
+    # Check mock mode first
+    if mock_generator:
+        options = mock_generator.get_all_options()
+        underlying = mock_generator.get_underlying()
+        return {
+            "options": [option_to_dict(opt) for opt in options],
+            "underlying": underlying_to_dict(underlying),
+        }
+
     if not aggregator:
         return {"options": [], "underlying": None}
 
@@ -416,7 +495,30 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     try:
         # Send initial data snapshot
-        if aggregator:
+        if mock_generator:
+            # Mock mode - send mock data
+            options = mock_generator.get_all_options()
+            for option in options:
+                await connection_manager._send_to_client(
+                    websocket,
+                    {
+                        "type": "option_update",
+                        "data": option_to_dict(option),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+
+            underlying = mock_generator.get_underlying()
+            await connection_manager._send_to_client(
+                websocket,
+                {
+                    "type": "underlying_update",
+                    "data": underlying_to_dict(underlying),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        elif aggregator:
+            # Real mode - send aggregated data
             options = aggregator.get_all_options()
             for option in options:
                 await connection_manager._send_to_client(
