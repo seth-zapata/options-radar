@@ -286,8 +286,8 @@ class GatingPipeline:
             greeks_age=option.greeks_age_seconds(now),
             # Liquidity
             spread_percent=option.spread_percent,
-            open_interest=0,  # TODO: Get from Alpaca REST
-            volume=0,  # TODO: Get from Alpaca REST
+            open_interest=option.open_interest,
+            volume=option.volume,
             bid_size=option.bid_size or 0,
             ask_size=option.ask_size or 0,
             # Greeks

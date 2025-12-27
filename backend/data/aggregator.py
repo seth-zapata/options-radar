@@ -40,6 +40,10 @@ class AggregatedOptionData:
     last: float | None = None
     quote_timestamp: str | None = None
 
+    # Volume/OI data
+    open_interest: int = 0
+    volume: int = 0
+
     # Greeks data (from ORATS)
     delta: float | None = None
     gamma: float | None = None

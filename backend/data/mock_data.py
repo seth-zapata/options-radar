@@ -176,6 +176,11 @@ def create_mock_option(
         strike=strike,
     )
 
+    # OI and volume - higher for ATM, lower for far OTM
+    oi_base = 5000 * math.exp(-moneyness * 5)
+    open_interest = max(100, int(oi_base * random.uniform(0.5, 1.5)))
+    volume = max(50, int(open_interest * random.uniform(0.1, 0.3)))
+
     return AggregatedOptionData(
         canonical_id=canonical_id,
         bid=bid,
@@ -184,6 +189,8 @@ def create_mock_option(
         ask_size=random.randint(10, 500),
         last=round((bid + ask) / 2, 2),
         quote_timestamp=now.isoformat(),  # Must be ISO string for age_seconds()
+        open_interest=open_interest,
+        volume=volume,
         delta=delta,
         gamma=gamma,
         theta=theta,
@@ -299,7 +306,7 @@ class MockDataGenerator:
             self._underlying_price, strike, time_to_exp, iv, is_call
         )
 
-        # Update the option
+        # Update the option (keep OI stable, slightly vary volume)
         updated = AggregatedOptionData(
             canonical_id=option.canonical_id,
             bid=bid,
@@ -308,6 +315,8 @@ class MockDataGenerator:
             ask_size=random.randint(10, 500),
             last=round((bid + ask) / 2, 2),
             quote_timestamp=now.isoformat(),  # Must be ISO string
+            open_interest=option.open_interest,  # OI stays stable
+            volume=option.volume + random.randint(0, 10),  # Volume accumulates
             delta=delta,
             gamma=option.gamma,  # Keep gamma/theta/vega stable
             theta=option.theta,
