@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color: #213547;
+  background-color: #f8fafc;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+/* Custom colors for options */
+.call-positive {
+  @apply text-green-600;
+}
+
+.put-negative {
+  @apply text-red-600;
+}
+
+.stale-data {
+  @apply opacity-50;
+}
+
+.fresh-data {
+  @apply opacity-100;
+}
+
+/* Gate status colors */
+.gate-pass {
+  @apply bg-green-100 text-green-800;
+}
+
+.gate-fail {
+  @apply bg-red-100 text-red-800;
+}
+
+.gate-soft-fail {
+  @apply bg-yellow-100 text-yellow-800;
+}

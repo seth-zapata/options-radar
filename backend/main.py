@@ -1,0 +1,385 @@
+"""FastAPI application entry point for OptionsRadar.
+
+Provides:
+- WebSocket endpoint for frontend clients
+- REST endpoints for health checks
+- Orchestrates data flow from Alpaca/ORATS to frontend
+
+Usage:
+    uvicorn backend.main:app --reload --port 8000
+
+See spec section 8.3 for architecture.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from dataclasses import asdict
+from datetime import datetime, timezone
+from typing import Any
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+
+from backend.config import load_config
+from backend.data import AlpacaOptionsClient, DataAggregator, ORATSClient, SubscriptionManager
+from backend.data.aggregator import AggregatedOptionData
+from backend.engine import GatingPipeline, PortfolioState, evaluate_option_for_signal
+from backend.models.market_data import UnderlyingData
+from backend.websocket import ConnectionManager
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+# Global state
+connection_manager = ConnectionManager()
+aggregator: DataAggregator | None = None
+alpaca_client: AlpacaOptionsClient | None = None
+orats_client: ORATSClient | None = None
+subscription_manager: SubscriptionManager | None = None
+
+# Background tasks
+_background_tasks: set[asyncio.Task] = set()
+
+
+def option_to_dict(option: AggregatedOptionData) -> dict[str, Any]:
+    """Convert AggregatedOptionData to JSON-serializable dict."""
+    now = datetime.now(timezone.utc)
+    return {
+        "canonicalId": {
+            "underlying": option.canonical_id.underlying,
+            "expiry": option.canonical_id.expiry,
+            "right": option.canonical_id.right,
+            "strike": option.canonical_id.strike,
+        },
+        "bid": option.bid,
+        "ask": option.ask,
+        "bidSize": option.bid_size,
+        "askSize": option.ask_size,
+        "last": option.last,
+        "mid": option.mid,
+        "spread": option.spread,
+        "spreadPercent": option.spread_percent,
+        "delta": option.delta,
+        "gamma": option.gamma,
+        "theta": option.theta,
+        "vega": option.vega,
+        "iv": option.iv,
+        "theoreticalValue": option.theoretical_value,
+        "quoteTimestamp": option.quote_timestamp,
+        "greeksTimestamp": option.greeks_timestamp,
+        "quoteAge": option.quote_age_seconds(now),
+        "greeksAge": option.greeks_age_seconds(now),
+    }
+
+
+def underlying_to_dict(underlying: UnderlyingData) -> dict[str, Any]:
+    """Convert UnderlyingData to JSON-serializable dict."""
+    now = datetime.now(timezone.utc)
+    return {
+        "symbol": underlying.symbol,
+        "price": underlying.price,
+        "ivRank": underlying.iv_rank,
+        "ivPercentile": underlying.iv_percentile,
+        "timestamp": underlying.timestamp,
+        "age": underlying.age_seconds(now),
+    }
+
+
+async def on_option_update(option: AggregatedOptionData) -> None:
+    """Callback when option data updates - broadcast to clients."""
+    await connection_manager.broadcast_option_update(option_to_dict(option))
+
+
+async def on_underlying_update(underlying: UnderlyingData) -> None:
+    """Callback when underlying data updates - broadcast to clients."""
+    await connection_manager.broadcast_underlying_update(underlying_to_dict(underlying))
+
+
+async def greeks_polling_loop() -> None:
+    """Background task to poll ORATS for Greeks updates."""
+    global orats_client, aggregator, subscription_manager
+
+    if not orats_client or not aggregator:
+        logger.warning("ORATS client not configured, skipping Greeks polling")
+        return
+
+    logger.info("Starting Greeks polling loop (60s interval)")
+
+    while True:
+        try:
+            await asyncio.sleep(60)  # Poll every 60 seconds
+
+            if not subscription_manager:
+                continue
+
+            symbol = subscription_manager.symbol
+            logger.debug(f"Fetching Greeks for {symbol}")
+
+            # Fetch Greeks for subscribed options
+            greeks_list = await orats_client.fetch_greeks(symbol, "", dte_max=60)
+
+            if greeks_list:
+                aggregator.update_greeks_batch(greeks_list)
+                logger.debug(f"Updated {len(greeks_list)} Greeks for {symbol}")
+
+            # Fetch IV rank
+            iv_data = await orats_client.fetch_iv_rank(symbol)
+            if iv_data:
+                aggregator.update_underlying(iv_data)
+
+        except asyncio.CancelledError:
+            logger.info("Greeks polling cancelled")
+            break
+        except Exception as e:
+            logger.error(f"Error in Greeks polling: {e}")
+            await asyncio.sleep(10)  # Brief pause on error
+
+
+async def alpaca_message_loop() -> None:
+    """Background task to process Alpaca WebSocket messages."""
+    global alpaca_client
+
+    if not alpaca_client:
+        return
+
+    logger.info("Starting Alpaca message processing loop")
+
+    try:
+        async for message in alpaca_client.messages():
+            # Message processing is handled via callbacks
+            pass
+    except asyncio.CancelledError:
+        logger.info("Alpaca message loop cancelled")
+    except Exception as e:
+        logger.error(f"Error in Alpaca message loop: {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan - startup and shutdown."""
+    global aggregator, alpaca_client, orats_client, subscription_manager
+
+    logger.info("Starting OptionsRadar server...")
+
+    try:
+        config = load_config()
+    except ValueError as e:
+        logger.error(f"Configuration error: {e}")
+        logger.warning("Running in demo mode without data sources")
+        yield
+        return
+
+    # Initialize aggregator
+    aggregator = DataAggregator(config=config)
+
+    # Initialize Alpaca client
+    def sync_option_callback(option: AggregatedOptionData) -> None:
+        """Sync wrapper for async callback."""
+        asyncio.create_task(on_option_update(option))
+
+    def sync_underlying_callback(underlying: UnderlyingData) -> None:
+        """Sync wrapper for async callback."""
+        asyncio.create_task(on_underlying_update(underlying))
+
+    aggregator.on_option_update = sync_option_callback
+    aggregator.on_underlying_update = sync_underlying_callback
+
+    alpaca_client = AlpacaOptionsClient(
+        config=config.alpaca,
+        on_quote=aggregator.update_quote,
+        on_state_change=lambda state: logger.info(f"Alpaca state: {state.value}"),
+    )
+
+    # Initialize ORATS client if configured
+    if config.orats.api_token:
+        orats_client = ORATSClient(config=config.orats)
+        await orats_client.__aenter__()
+
+    # Connect to Alpaca
+    await alpaca_client.connect()
+
+    # Set up subscription manager
+    subscription_manager = SubscriptionManager(
+        config=config.alpaca,
+        client=alpaca_client,
+        symbol="NVDA",  # MVP: Single symbol
+        strikes_around_atm=10,
+    )
+    await subscription_manager.start()
+
+    logger.info(f"Subscribed to {subscription_manager.subscribed_count} contracts")
+
+    # Start background tasks
+    task = asyncio.create_task(alpaca_message_loop())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    if orats_client:
+        task = asyncio.create_task(greeks_polling_loop())
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+
+    logger.info("OptionsRadar server ready")
+
+    yield
+
+    # Shutdown
+    logger.info("Shutting down OptionsRadar server...")
+
+    # Cancel background tasks
+    for task in _background_tasks:
+        task.cancel()
+
+    if _background_tasks:
+        await asyncio.gather(*_background_tasks, return_exceptions=True)
+
+    # Cleanup
+    if subscription_manager:
+        await subscription_manager.stop()
+
+    if alpaca_client:
+        await alpaca_client.disconnect()
+
+    if orats_client:
+        await orats_client.__aexit__(None, None, None)
+
+    logger.info("Shutdown complete")
+
+
+# Create FastAPI app
+app = FastAPI(
+    title="OptionsRadar API",
+    description="Real-time options recommendation system",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+# CORS for frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/health")
+async def health_check() -> dict[str, Any]:
+    """Health check endpoint."""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "connections": connection_manager.connection_count,
+        "alpaca_connected": alpaca_client is not None,
+        "orats_configured": orats_client is not None,
+    }
+
+
+@app.get("/api/options")
+async def get_options() -> dict[str, Any]:
+    """Get current snapshot of all options data."""
+    if not aggregator:
+        return {"options": [], "underlying": None}
+
+    options = aggregator.get_all_options()
+    underlying = aggregator.get_underlying("NVDA")
+
+    return {
+        "options": [option_to_dict(opt) for opt in options],
+        "underlying": underlying_to_dict(underlying) if underlying else None,
+    }
+
+
+@app.get("/api/gates/{symbol}")
+async def evaluate_gates(symbol: str) -> dict[str, Any]:
+    """Evaluate gates for a symbol's options."""
+    if not aggregator:
+        return {"error": "Aggregator not initialized"}
+
+    options = aggregator.get_options_for_underlying(symbol)
+    underlying = aggregator.get_underlying(symbol)
+
+    results = []
+    for option in options[:5]:  # Limit for demo
+        result = evaluate_option_for_signal(
+            option=option,
+            underlying=underlying,
+            action="BUY_CALL" if option.canonical_id.right == "C" else "BUY_PUT",
+        )
+
+        gate_results = [
+            {
+                "name": g.gate_name,
+                "passed": g.passed,
+                "value": g.value,
+                "threshold": g.threshold,
+                "message": g.message,
+            }
+            for g in result.all_results
+        ]
+
+        results.append({
+            "option": f"{option.canonical_id.strike}{option.canonical_id.right}",
+            "passed": result.passed,
+            "stageReached": result.stage_reached.value,
+            "confidenceCap": result.confidence_cap,
+            "gates": gate_results,
+            "abstain": {
+                "reason": result.abstain.reason.value,
+                "resumeCondition": result.abstain.resume_condition,
+            } if result.abstain else None,
+        })
+
+    return {"evaluations": results}
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket) -> None:
+    """WebSocket endpoint for real-time updates."""
+    await connection_manager.connect(websocket)
+
+    try:
+        # Send initial data snapshot
+        if aggregator:
+            options = aggregator.get_all_options()
+            for option in options:
+                await connection_manager._send_to_client(
+                    websocket,
+                    {
+                        "type": "option_update",
+                        "data": option_to_dict(option),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+
+            underlying = aggregator.get_underlying("NVDA")
+            if underlying:
+                await connection_manager._send_to_client(
+                    websocket,
+                    {
+                        "type": "underlying_update",
+                        "data": underlying_to_dict(underlying),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+
+        # Keep connection alive and handle client messages
+        while True:
+            data = await websocket.receive_text()
+            # Handle client messages (subscribe/unsubscribe) here if needed
+            logger.debug(f"Received from client: {data}")
+
+    except WebSocketDisconnect:
+        connection_manager.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        connection_manager.disconnect(websocket)

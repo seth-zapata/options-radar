@@ -103,6 +103,45 @@ TEST: Pipeline - Abstain on Stale Data
 Phase 2 tests completed successfully!
 ```
 
+## Testing Phase 3 (MVP UI)
+
+Run the Phase 3 integration test:
+
+```bash
+source venv/bin/activate
+python -m backend.test_phase3
+```
+
+This tests:
+- FastAPI module imports
+- WebSocket manager functionality
+- REST API endpoints (/health, /api/options)
+- Data flow simulation
+- Frontend file structure
+
+**Running the full system:**
+
+Terminal 1 - Backend:
+```bash
+source venv/bin/activate
+uvicorn backend.main:app --reload
+```
+
+Terminal 2 - Frontend:
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Then open http://localhost:5173 in your browser.
+
+**Expected UI:**
+- Status bar with connection status and NVDA price
+- Options chain table with calls/puts, bid/ask, delta, IV
+- Abstain panel showing gate status
+- Real-time updates when market is open
+
 ## Quick Demo (Quote Streaming)
 
 ```bash
@@ -147,7 +186,7 @@ options-radar/
 
 - [x] **Phase 1: Data Foundation** - Canonical IDs, Alpaca streaming, ORATS client, aggregator
 - [x] **Phase 2: Gating Engine** - Gate framework, pipeline, abstain generation
-- [ ] **Phase 3: MVP UI** - FastAPI WebSocket, React chain view
+- [x] **Phase 3: MVP UI** - FastAPI WebSocket, React chain view
 - [ ] **Phase 4: Recommendation Logic** - Strike selection, position sizing
 - [ ] **Phase 5: Evaluation** - Shadow mode logging, metrics
 - [ ] **Phase 6: Expansion** - Sentiment, scanner, portfolio integration
