@@ -13,8 +13,33 @@ export interface EvaluatedOption {
   premium: number | null;
 }
 
-// Default watchlist - can be extended
-export const WATCHLIST = ['NVDA', 'AAPL', 'TSLA', 'AMD', 'QQQ', 'SPY'];
+// Core ETFs that are always in the watchlist
+export const CORE_SYMBOLS = ['QQQ', 'SPY'];
+
+// Load watchlist from localStorage or use defaults
+const getInitialWatchlist = (): string[] => {
+  try {
+    const saved = localStorage.getItem('options-radar-watchlist');
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      // Ensure core symbols are always included
+      const withCore = new Set([...CORE_SYMBOLS, ...parsed]);
+      return Array.from(withCore);
+    }
+  } catch (e) {
+    console.error('Failed to load watchlist from localStorage:', e);
+  }
+  return [...CORE_SYMBOLS];
+};
+
+// Save watchlist to localStorage
+const saveWatchlist = (symbols: string[]) => {
+  try {
+    localStorage.setItem('options-radar-watchlist', JSON.stringify(symbols));
+  } catch (e) {
+    console.error('Failed to save watchlist to localStorage:', e);
+  }
+};
 
 interface OptionsState {
   // Connection
@@ -23,6 +48,7 @@ interface OptionsState {
 
   // Symbol Selection
   activeSymbol: string;
+  watchlist: string[];
 
   // Market Data
   options: Map<string, OptionData>;
@@ -54,14 +80,21 @@ interface OptionsState {
   addExitSignal: (signal: ExitSignal) => void;
   clearExitSignal: (positionId: string) => void;
   setActiveSymbol: (symbol: string) => void;
+  addToWatchlist: (symbol: string) => void;
+  removeFromWatchlist: (symbol: string) => void;
+  dismissRecommendation: (recId: string) => void;
+  clearExpiredRecommendations: () => void;
   clearAll: () => void;
 }
+
+const initialWatchlist = getInitialWatchlist();
 
 export const useOptionsStore = create<OptionsState>((set) => ({
   // Initial state
   connectionStatus: 'disconnected',
   lastMessageTime: null,
-  activeSymbol: WATCHLIST[0], // Default to first symbol (NVDA)
+  activeSymbol: initialWatchlist[0], // Default to first symbol
+  watchlist: initialWatchlist,
   options: new Map(),
   underlying: null,
   abstain: null,
@@ -138,6 +171,52 @@ export const useOptionsStore = create<OptionsState>((set) => ({
     abstain: null,
     gateResults: [],
     evaluatedOption: null,
+  }),
+
+  addToWatchlist: (symbol) => set((state) => {
+    const upperSymbol = symbol.toUpperCase();
+    if (state.watchlist.includes(upperSymbol)) return state;
+    const newWatchlist = [...state.watchlist, upperSymbol];
+    saveWatchlist(newWatchlist);
+    return { watchlist: newWatchlist };
+  }),
+
+  removeFromWatchlist: (symbol) => set((state) => {
+    const upperSymbol = symbol.toUpperCase();
+    // Don't allow removing core symbols
+    if (CORE_SYMBOLS.includes(upperSymbol)) return state;
+    const newWatchlist = state.watchlist.filter(s => s !== upperSymbol);
+    saveWatchlist(newWatchlist);
+    // If we're removing the active symbol, switch to first in list
+    const newActiveSymbol = state.activeSymbol === upperSymbol
+      ? newWatchlist[0]
+      : state.activeSymbol;
+    return {
+      watchlist: newWatchlist,
+      activeSymbol: newActiveSymbol,
+      // Clear data if we switched symbols
+      ...(state.activeSymbol === upperSymbol ? {
+        options: new Map(),
+        underlying: null,
+        abstain: null,
+        gateResults: [],
+        evaluatedOption: null,
+      } : {}),
+    };
+  }),
+
+  dismissRecommendation: (recId) => set((state) => ({
+    recommendations: state.recommendations.filter(r => r.id !== recId),
+  })),
+
+  clearExpiredRecommendations: () => set((state) => {
+    const now = new Date();
+    return {
+      recommendations: state.recommendations.filter(r => {
+        // Filter out expired recommendations (validUntil has passed)
+        return new Date(r.validUntil) > now;
+      }),
+    };
   }),
 
   clearAll: () => set({

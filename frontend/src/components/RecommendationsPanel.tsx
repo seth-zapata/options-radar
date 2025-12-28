@@ -163,7 +163,7 @@ function FillPriceModal({ rec, onClose, onConfirm }: FillPriceModalProps) {
   );
 }
 
-function RecommendationCard({ rec, isLatest, isConfirmed }: { rec: Recommendation; isLatest: boolean; isConfirmed: boolean }) {
+function RecommendationCard({ rec, isLatest, isConfirmed, onDismiss }: { rec: Recommendation; isLatest: boolean; isConfirmed: boolean; onDismiss: () => void }) {
   const [showGates, setShowGates] = useState(false);
   const [showFillModal, setShowFillModal] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -232,10 +232,21 @@ function RecommendationCard({ rec, isLatest, isConfirmed }: { rec: Recommendatio
               </span>
             )}
           </div>
-          <span className="text-sm opacity-90">
-            {formatTimeAgo(rec.generatedAt)}
-            {expired && ' (expired)'}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="text-sm opacity-90">
+              {formatTimeAgo(rec.generatedAt)}
+              {expired && ' (expired)'}
+            </span>
+            {(expired || isConfirmed) && (
+              <button
+                onClick={onDismiss}
+                className="text-white/70 hover:text-white text-sm"
+                title="Dismiss"
+              >
+                ×
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -391,21 +402,39 @@ export function RecommendationsPanel() {
   const recommendations = useOptionsStore((state) => state.recommendations);
   const abstain = useOptionsStore((state) => state.abstain);
   const positions = useOptionsStore((state) => state.positions);
+  const dismissRecommendation = useOptionsStore((state) => state.dismissRecommendation);
+  const clearExpiredRecommendations = useOptionsStore((state) => state.clearExpiredRecommendations);
 
   // Get set of confirmed recommendation IDs
   const confirmedRecIds = new Set(positions.map((p) => p.recommendationId));
 
+  // Count expired recommendations
+  const expiredCount = recommendations.filter(r => isExpired(r.validUntil)).length;
+
   return (
     <div className="bg-white rounded-lg shadow overflow-hidden">
       <div className="px-4 py-3 bg-indigo-600 text-white">
-        <h2 className="font-bold text-lg">Trade Signals</h2>
-        <p className="text-sm text-indigo-200">
-          {recommendations.length > 0
-            ? `${recommendations.length} signal${recommendations.length !== 1 ? 's' : ''} generated`
-            : abstain
-              ? 'Waiting for gates to pass'
-              : 'Monitoring for opportunities'}
-        </p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="font-bold text-lg">Trade Signals</h2>
+            <p className="text-sm text-indigo-200">
+              {recommendations.length > 0
+                ? `${recommendations.length} signal${recommendations.length !== 1 ? 's' : ''} generated`
+                : abstain
+                  ? 'Waiting for gates to pass'
+                  : 'Monitoring for opportunities'}
+            </p>
+          </div>
+          {expiredCount > 0 && (
+            <button
+              onClick={clearExpiredRecommendations}
+              className="px-2 py-1 text-xs bg-indigo-500 hover:bg-indigo-400 rounded"
+              title="Clear all expired signals"
+            >
+              Clear {expiredCount} expired
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="p-4 space-y-3">
@@ -428,6 +457,7 @@ export function RecommendationsPanel() {
                 rec={rec}
                 isLatest={index === 0}
                 isConfirmed={confirmedRecIds.has(rec.id)}
+                onDismiss={() => dismissRecommendation(rec.id)}
               />
             ))}
           </div>

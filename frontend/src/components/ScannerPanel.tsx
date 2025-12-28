@@ -3,7 +3,8 @@
  * Fetches data from the backend scanner API endpoints.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { useOptionsStore } from '../store/optionsStore';
 
 const API_BASE = 'http://localhost:8000';
 
@@ -61,6 +62,9 @@ function SentimentBadge({ score, label }: { score: number; label: string }) {
 }
 
 function WSBCard({ item }: { item: WSBTrending }) {
+  const { watchlist, addToWatchlist } = useOptionsStore();
+  const isInWatchlist = watchlist.includes(item.symbol);
+
   return (
     <div className="flex items-center justify-between py-2 px-3 bg-slate-50 rounded-lg">
       <div className="flex items-center gap-3">
@@ -70,11 +74,25 @@ function WSBCard({ item }: { item: WSBTrending }) {
           {item.isBullish ? 'Bullish' : 'Bearish'}
         </span>
       </div>
-      <div className="flex items-center gap-3 text-sm">
+      <div className="flex items-center gap-2 text-sm">
         <span className="text-slate-500">{item.mentions24h.toLocaleString()} mentions</span>
         <span className={`font-medium ${item.sentimentScore >= 0 ? 'text-green-600' : 'text-red-600'}`}>
           {item.sentimentScore >= 0 ? '+' : ''}{item.sentimentScore.toFixed(0)}
         </span>
+        {!isInWatchlist && (
+          <button
+            onClick={() => addToWatchlist(item.symbol)}
+            className="ml-1 px-1.5 py-0.5 text-xs bg-indigo-100 text-indigo-700 hover:bg-indigo-200 rounded"
+            title={`Add ${item.symbol} to watchlist`}
+          >
+            +
+          </button>
+        )}
+        {isInWatchlist && (
+          <span className="ml-1 px-1.5 py-0.5 text-xs bg-green-100 text-green-700 rounded">
+            ✓
+          </span>
+        )}
       </div>
     </div>
   );
@@ -82,12 +100,26 @@ function WSBCard({ item }: { item: WSBTrending }) {
 
 function OpportunityCard({ item }: { item: ScanResult }) {
   const [expanded, setExpanded] = useState(false);
+  const { watchlist, addToWatchlist } = useOptionsStore();
+  const isInWatchlist = watchlist.includes(item.symbol);
 
   return (
     <div className={`p-3 rounded-lg border ${item.isStrongOpportunity ? 'border-green-300 bg-green-50' : 'border-slate-200 bg-white'}`}>
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="font-bold text-lg">{item.symbol}</span>
+          {!isInWatchlist && (
+            <button
+              onClick={() => addToWatchlist(item.symbol)}
+              className="px-1.5 py-0.5 text-xs bg-indigo-100 text-indigo-700 hover:bg-indigo-200 rounded"
+              title={`Add ${item.symbol} to watchlist`}
+            >
+              +
+            </button>
+          )}
+          {isInWatchlist && (
+            <span className="px-1.5 py-0.5 text-xs bg-green-100 text-green-700 rounded">✓</span>
+          )}
           <span className={`text-xs px-2 py-0.5 rounded font-medium ${
             item.direction === 'bullish' ? 'bg-green-100 text-green-700' :
             item.direction === 'bearish' ? 'bg-red-100 text-red-700' :
@@ -152,7 +184,7 @@ export function ScannerPanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<string | null>(null);
-  const [retryCount, setRetryCount] = useState(0);
+  const retryCountRef = useRef(0);
 
   const fetchHotPicks = useCallback(async (isRetry = false) => {
     const maxRetries = 2;
@@ -162,7 +194,7 @@ export function ScannerPanel() {
       setLoading(true);
       if (!isRetry) {
         setError(null);
-        setRetryCount(0);
+        retryCountRef.current = 0;
       }
 
       // Create abort controller for timeout
@@ -185,18 +217,21 @@ export function ScannerPanel() {
 
       setHotPicks(data);
       setLastUpdate(new Date().toLocaleTimeString());
-      setRetryCount(0);
+      // Clear error and retry count on success
+      setError(null);
+      retryCountRef.current = 0;
     } catch (err) {
       const errorMessage = err instanceof Error
         ? (err.name === 'AbortError' ? 'Request timed out' : err.message)
         : 'Failed to load';
 
       // Auto-retry on timeout or network error
-      if (retryCount < maxRetries && (err instanceof Error && (err.name === 'AbortError' || err.message.includes('fetch')))) {
-        setRetryCount(prev => prev + 1);
-        setError(`${errorMessage} - Retrying... (${retryCount + 1}/${maxRetries})`);
+      const currentRetry = retryCountRef.current;
+      if (currentRetry < maxRetries && (err instanceof Error && (err.name === 'AbortError' || err.message.includes('fetch')))) {
+        retryCountRef.current = currentRetry + 1;
+        setError(`${errorMessage} - Retrying... (${currentRetry + 1}/${maxRetries})`);
         // Exponential backoff: 2s, 4s
-        setTimeout(() => fetchHotPicks(true), 2000 * Math.pow(2, retryCount));
+        setTimeout(() => fetchHotPicks(true), 2000 * Math.pow(2, currentRetry));
         return;
       }
 
@@ -204,7 +239,7 @@ export function ScannerPanel() {
     } finally {
       setLoading(false);
     }
-  }, [retryCount]);
+  }, []);
 
   // Fetch on mount and every 5 minutes
   useEffect(() => {

@@ -3,7 +3,7 @@
  */
 
 import { useEffect, useState, useCallback } from 'react';
-import { useOptionsStore, WATCHLIST } from '../store/optionsStore';
+import { useOptionsStore, CORE_SYMBOLS } from '../store/optionsStore';
 
 interface MarketInfo {
   isOpen: boolean;
@@ -32,10 +32,39 @@ function formatDuration(totalSeconds: number): string {
 }
 
 export function StatusBar() {
-  const { connectionStatus, underlying, lastMessageTime, options, activeSymbol, setActiveSymbol } = useOptionsStore();
+  const {
+    connectionStatus,
+    underlying,
+    lastMessageTime,
+    options,
+    activeSymbol,
+    setActiveSymbol,
+    watchlist,
+    addToWatchlist,
+    removeFromWatchlist,
+  } = useOptionsStore();
   const [marketInfo, setMarketInfo] = useState<MarketInfo | null>(null);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [lastFetchTime, setLastFetchTime] = useState<number>(0);
+  const [showAddSymbol, setShowAddSymbol] = useState(false);
+  const [newSymbol, setNewSymbol] = useState('');
+
+  const handleAddSymbol = () => {
+    if (newSymbol.trim()) {
+      addToWatchlist(newSymbol.trim().toUpperCase());
+      setNewSymbol('');
+      setShowAddSymbol(false);
+    }
+  };
+
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      handleAddSymbol();
+    } else if (e.key === 'Escape') {
+      setShowAddSymbol(false);
+      setNewSymbol('');
+    }
+  };
 
   // Fetch market status from API
   const fetchMarketStatus = useCallback(async () => {
@@ -181,23 +210,80 @@ export function StatusBar() {
 
       {/* Symbol Tabs */}
       <div className="bg-slate-700 px-4 py-1 flex items-center gap-1 overflow-x-auto">
-        {WATCHLIST.map((symbol) => {
+        {watchlist.map((symbol) => {
           const isActive = symbol === activeSymbol;
+          const isCore = CORE_SYMBOLS.includes(symbol);
 
           return (
-            <button
-              key={symbol}
-              onClick={() => setActiveSymbol(symbol)}
-              className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
-                isActive
-                  ? 'bg-indigo-600 text-white'
-                  : 'bg-slate-600 text-slate-200 hover:bg-slate-500'
-              }`}
-            >
-              {symbol}
-            </button>
+            <div key={symbol} className="flex items-center">
+              <button
+                onClick={() => setActiveSymbol(symbol)}
+                className={`px-3 py-1 rounded-l text-sm font-medium transition-colors ${
+                  isActive
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-slate-600 text-slate-200 hover:bg-slate-500'
+                } ${isCore ? 'rounded-r' : ''}`}
+              >
+                {symbol}
+              </button>
+              {!isCore && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    removeFromWatchlist(symbol);
+                  }}
+                  className={`px-1.5 py-1 rounded-r text-xs transition-colors ${
+                    isActive
+                      ? 'bg-indigo-700 text-indigo-200 hover:bg-red-600 hover:text-white'
+                      : 'bg-slate-500 text-slate-300 hover:bg-red-600 hover:text-white'
+                  }`}
+                  title={`Remove ${symbol}`}
+                >
+                  ×
+                </button>
+              )}
+            </div>
           );
         })}
+
+        {/* Add Symbol Button/Input */}
+        {showAddSymbol ? (
+          <div className="flex items-center">
+            <input
+              type="text"
+              value={newSymbol}
+              onChange={(e) => setNewSymbol(e.target.value.toUpperCase())}
+              onKeyDown={handleKeyPress}
+              placeholder="SYMBOL"
+              className="w-20 px-2 py-1 text-sm bg-slate-600 text-white rounded-l border-0 focus:ring-1 focus:ring-indigo-500 outline-none placeholder-slate-400"
+              autoFocus
+              maxLength={5}
+            />
+            <button
+              onClick={handleAddSymbol}
+              className="px-2 py-1 bg-green-600 hover:bg-green-500 text-white text-sm rounded-r"
+            >
+              +
+            </button>
+            <button
+              onClick={() => {
+                setShowAddSymbol(false);
+                setNewSymbol('');
+              }}
+              className="ml-1 px-2 py-1 bg-slate-500 hover:bg-slate-400 text-white text-sm rounded"
+            >
+              ×
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setShowAddSymbol(true)}
+            className="px-3 py-1 rounded text-sm font-medium bg-slate-600 text-slate-300 hover:bg-green-600 hover:text-white transition-colors"
+            title="Add symbol to watchlist"
+          >
+            +
+          </button>
+        )}
       </div>
     </div>
   );
