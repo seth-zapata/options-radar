@@ -72,7 +72,8 @@ class SignalQualityConfig:
     # Symbols where signals are disabled (poor backtest accuracy ~50% or worse)
     # These can still be monitored in scanner but won't generate recommendations
     # AMD/AAPL: ~50% accuracy, QQQ: 46.7% (worse than random for ETFs)
-    signals_disabled: tuple[str, ...] = ("AMD", "AAPL", "QQQ")
+    # GME: 34.9% 5-day (inverse), SMCI: 38.1% 1-day (inverse)
+    signals_disabled: tuple[str, ...] = ("AMD", "AAPL", "QQQ", "GME", "SMCI")
 
     # IV Rank thresholds for buy signals
     # Buy signals only fire when IV is relatively cheap
@@ -111,8 +112,15 @@ class AppConfig:
     quiver: QuiverConfig
     log_level: str
 
-    # Watchlist - Phase 6 expanded
-    watchlist: tuple[str, ...] = ("NVDA", "QQQ", "AAPL", "TSLA", "SPY", "AMD", "GOOGL", "AMZN", "META", "MSFT")
+    # Watchlist - expanded with WSB favorites
+    # Signal-enabled: NVDA, TSLA, PLTR, COIN, MARA, RKLB, ASTS (>55% backtest accuracy)
+    # Scanner-only: QQQ, AAPL, SPY, AMD, GOOGL, AMZN, META, MSFT, GME, SMCI
+    watchlist: tuple[str, ...] = (
+        # Signal-enabled (high backtest accuracy)
+        "NVDA", "TSLA", "PLTR", "COIN", "MARA", "RKLB", "ASTS",
+        # Scanner-only (disabled for signals)
+        "QQQ", "AAPL", "SPY", "AMD", "GOOGL", "AMZN", "META", "MSFT", "GME", "SMCI",
+    )
 
     # Staleness thresholds (seconds)
     quote_stale_threshold: float = 5.0

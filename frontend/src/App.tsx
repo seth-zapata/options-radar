@@ -13,8 +13,9 @@ import { AbstainPanel } from './components/AbstainPanel';
 import { RecommendationsPanel } from './components/RecommendationsPanel';
 import { ScannerPanel } from './components/ScannerPanel';
 import { PositionsPanel } from './components/PositionsPanel';
+import { MetricsPanel } from './components/MetricsPanel';
 
-type RightPanelTab = 'signals' | 'scanner' | 'positions';
+type RightPanelTab = 'signals' | 'scanner' | 'positions' | 'metrics';
 
 function App() {
   // Connect to WebSocket
@@ -92,6 +93,16 @@ function App() {
                     </span>
                   )}
                 </button>
+                <button
+                  onClick={() => setActiveTab('metrics')}
+                  className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
+                    activeTab === 'metrics'
+                      ? 'bg-amber-50 text-amber-700 border-b-2 border-amber-600'
+                      : 'text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  Metrics
+                </button>
               </div>
             </div>
 
@@ -106,6 +117,8 @@ function App() {
             {activeTab === 'scanner' && <ScannerPanel />}
 
             {activeTab === 'positions' && <PositionsPanel />}
+
+            {activeTab === 'metrics' && <MetricsPanel />}
           </div>
         </div>
       </main>

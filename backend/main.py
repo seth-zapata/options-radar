@@ -1333,6 +1333,179 @@ async def get_evaluation_summary() -> dict[str, Any]:
     }
 
 
+@app.get("/api/metrics/dashboard")
+async def get_metrics_dashboard() -> dict[str, Any]:
+    """Get comprehensive metrics dashboard data.
+
+    Returns:
+        - Overall metrics
+        - Accuracy by symbol
+        - Confidence calibration buckets
+        - Aligned vs non-aligned performance
+        - Rolling accuracy over time
+        - Position P/L summary
+    """
+    logs = evaluation_logger.get_logs()
+
+    # Overall metrics
+    overall = metrics_calculator.calculate(logs)
+
+    # Accuracy by symbol
+    symbols_data: dict[str, dict[str, Any]] = {}
+    for log in logs:
+        if log.decision_type != "recommendation":
+            continue
+        symbol = log.underlying
+        if symbol not in symbols_data:
+            symbols_data[symbol] = {
+                "symbol": symbol,
+                "totalSignals": 0,
+                "withOutcomes": 0,
+                "wins": 0,
+                "losses": 0,
+                "totalPnl": 0.0,
+            }
+        symbols_data[symbol]["totalSignals"] += 1
+        if log.outcome is not None:
+            symbols_data[symbol]["withOutcomes"] += 1
+            if log.outcome.would_have_profited:
+                symbols_data[symbol]["wins"] += 1
+            elif log.outcome.would_have_profited is False:
+                symbols_data[symbol]["losses"] += 1
+            if log.outcome.theoretical_pnl:
+                symbols_data[symbol]["totalPnl"] += log.outcome.theoretical_pnl
+
+    # Calculate accuracy per symbol
+    symbol_stats = []
+    for data in symbols_data.values():
+        if data["withOutcomes"] > 0:
+            data["accuracy"] = round(data["wins"] / data["withOutcomes"] * 100, 1)
+        else:
+            data["accuracy"] = None
+        symbol_stats.append(data)
+    symbol_stats.sort(key=lambda x: x["totalSignals"], reverse=True)
+
+    # Confidence calibration buckets
+    conf_buckets = {
+        "0-50": {"signals": 0, "wins": 0, "expectedRate": 25},
+        "51-60": {"signals": 0, "wins": 0, "expectedRate": 55},
+        "61-70": {"signals": 0, "wins": 0, "expectedRate": 65},
+        "71-80": {"signals": 0, "wins": 0, "expectedRate": 75},
+        "81-90": {"signals": 0, "wins": 0, "expectedRate": 85},
+        "91-100": {"signals": 0, "wins": 0, "expectedRate": 95},
+    }
+    for log in logs:
+        if log.decision_type != "recommendation" or log.outcome is None:
+            continue
+        conf = log.recommendation_confidence or 0
+        if conf <= 50:
+            bucket = "0-50"
+        elif conf <= 60:
+            bucket = "51-60"
+        elif conf <= 70:
+            bucket = "61-70"
+        elif conf <= 80:
+            bucket = "71-80"
+        elif conf <= 90:
+            bucket = "81-90"
+        else:
+            bucket = "91-100"
+        conf_buckets[bucket]["signals"] += 1
+        if log.outcome.would_have_profited:
+            conf_buckets[bucket]["wins"] += 1
+
+    # Calculate actual rates
+    calibration = []
+    for bucket, data in conf_buckets.items():
+        if data["signals"] > 0:
+            actual = round(data["wins"] / data["signals"] * 100, 1)
+        else:
+            actual = None
+        calibration.append({
+            "bucket": bucket,
+            "signals": data["signals"],
+            "wins": data["wins"],
+            "expectedRate": data["expectedRate"],
+            "actualRate": actual,
+        })
+
+    # Aligned vs non-aligned (parse from rationale which contains [ALIGNED]/[NOT_ALIGNED] tags)
+    alignment_data = {
+        "aligned": {"signals": 0, "wins": 0, "losses": 0, "pnl": 0.0},
+        "notAligned": {"signals": 0, "wins": 0, "losses": 0, "pnl": 0.0},
+        "noNews": {"signals": 0, "wins": 0, "losses": 0, "pnl": 0.0},
+    }
+    for log in logs:
+        if log.decision_type != "recommendation":
+            continue
+        rationale = log.recommendation_rationale or ""
+        if "[ALIGNED]" in rationale:
+            key = "aligned"
+        elif "[NOT_ALIGNED]" in rationale:
+            key = "notAligned"
+        elif "[NO_NEWS]" in rationale:
+            key = "noNews"
+        else:
+            continue  # Can't determine alignment
+
+        alignment_data[key]["signals"] += 1
+        if log.outcome is not None:
+            if log.outcome.would_have_profited:
+                alignment_data[key]["wins"] += 1
+            elif log.outcome.would_have_profited is False:
+                alignment_data[key]["losses"] += 1
+            if log.outcome.theoretical_pnl:
+                alignment_data[key]["pnl"] += log.outcome.theoretical_pnl
+
+    # Calculate alignment accuracy
+    alignment_stats = []
+    for key, data in alignment_data.items():
+        total_outcomes = data["wins"] + data["losses"]
+        accuracy = round(data["wins"] / total_outcomes * 100, 1) if total_outcomes > 0 else None
+        alignment_stats.append({
+            "type": key,
+            "signals": data["signals"],
+            "withOutcomes": total_outcomes,
+            "wins": data["wins"],
+            "losses": data["losses"],
+            "accuracy": accuracy,
+            "pnl": round(data["pnl"], 2),
+        })
+
+    # Position P/L summary from position tracker
+    open_positions = position_tracker.get_open_positions()
+    closed_positions = position_tracker.get_closed_positions()
+
+    total_open_pnl = sum(p.unrealized_pnl or 0 for p in open_positions)
+    total_closed_pnl = sum(p.realized_pnl or 0 for p in closed_positions)
+    win_trades = [p for p in closed_positions if p.realized_pnl and p.realized_pnl > 0]
+    lose_trades = [p for p in closed_positions if p.realized_pnl and p.realized_pnl < 0]
+
+    position_summary = {
+        "openPositions": len(open_positions),
+        "closedPositions": len(closed_positions),
+        "unrealizedPnl": round(total_open_pnl, 2),
+        "realizedPnl": round(total_closed_pnl, 2),
+        "totalPnl": round(total_open_pnl + total_closed_pnl, 2),
+        "winningTrades": len(win_trades),
+        "losingTrades": len(lose_trades),
+        "winRate": round(len(win_trades) / len(closed_positions) * 100, 1) if closed_positions else None,
+    }
+
+    return {
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "overall": overall.to_dict(),
+        "bySymbol": symbol_stats,
+        "confidenceCalibration": calibration,
+        "alignmentAnalysis": alignment_stats,
+        "positionSummary": position_summary,
+        "config": {
+            "signalsEnabled": [s for s in load_config().watchlist if s not in load_config().signal_quality.signals_disabled],
+            "signalsDisabled": list(load_config().signal_quality.signals_disabled),
+        }
+    }
+
+
 # ============================================================================
 # Scanner API Endpoints
 # ============================================================================
