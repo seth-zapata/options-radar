@@ -43,6 +43,21 @@ class SignalEvent:
     exit_price_5d: float | None = None
 
     @property
+    def mention_bucket(self) -> Literal["low", "medium", "high"]:
+        """Categorize signal by mention volume.
+
+        Low: 1-5 mentions (lower reliability)
+        Medium: 6-20 mentions (moderate reliability)
+        High: 20+ mentions (highest reliability)
+        """
+        if self.mentions <= 5:
+            return "low"
+        elif self.mentions <= 20:
+            return "medium"
+        else:
+            return "high"
+
+    @property
     def direction_correct_1d(self) -> bool | None:
         """Was the 1-day direction prediction correct?"""
         if self.entry_price is None or self.exit_price_1d is None:
@@ -84,6 +99,33 @@ class SignalEvent:
 
 
 @dataclass
+class MentionBucketStats:
+    """Accuracy statistics for a mention volume bucket."""
+
+    bucket: Literal["low", "medium", "high"]
+    total_signals: int
+    accuracy_1d: float  # 0-100%
+    correct_1d: int
+    incorrect_1d: int
+    accuracy_5d: float  # 0-100%
+    correct_5d: int
+    incorrect_5d: int
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to JSON-serializable dict."""
+        return {
+            "bucket": self.bucket,
+            "totalSignals": self.total_signals,
+            "accuracy1d": round(self.accuracy_1d, 1),
+            "correct1d": self.correct_1d,
+            "incorrect1d": self.incorrect_1d,
+            "accuracy5d": round(self.accuracy_5d, 1),
+            "correct5d": self.correct_5d,
+            "incorrect5d": self.incorrect_5d,
+        }
+
+
+@dataclass
 class BacktestResult:
     """Results from a directional backtest."""
 
@@ -109,6 +151,9 @@ class BacktestResult:
     avg_return_when_bearish_1d: float | None
     avg_return_when_bullish_5d: float | None
     avg_return_when_bearish_5d: float | None
+
+    # Mention bucket analysis (new)
+    by_mention_bucket: dict[str, MentionBucketStats] = field(default_factory=dict)
 
     # Individual signals for analysis
     signals: list[SignalEvent] = field(default_factory=list)
@@ -136,6 +181,10 @@ class BacktestResult:
             if self.avg_return_when_bullish_5d else None,
             "avgReturnBearish5d": round(self.avg_return_when_bearish_5d, 2)
             if self.avg_return_when_bearish_5d else None,
+            "byMentionBucket": {
+                bucket: stats.to_dict()
+                for bucket, stats in self.by_mention_bucket.items()
+            },
         }
 
 
@@ -317,6 +366,35 @@ class DirectionalBacktest:
 
         return signals
 
+    def _calculate_bucket_stats(
+        self,
+        bucket: Literal["low", "medium", "high"],
+        signals: list[SignalEvent],
+    ) -> MentionBucketStats:
+        """Calculate accuracy stats for a mention bucket."""
+        bucket_signals = [s for s in signals if s.mention_bucket == bucket]
+
+        correct_1d = sum(1 for s in bucket_signals if s.direction_correct_1d is True)
+        incorrect_1d = sum(1 for s in bucket_signals if s.direction_correct_1d is False)
+        total_1d = correct_1d + incorrect_1d
+        accuracy_1d = (correct_1d / total_1d * 100) if total_1d > 0 else 0
+
+        correct_5d = sum(1 for s in bucket_signals if s.direction_correct_5d is True)
+        incorrect_5d = sum(1 for s in bucket_signals if s.direction_correct_5d is False)
+        total_5d = correct_5d + incorrect_5d
+        accuracy_5d = (correct_5d / total_5d * 100) if total_5d > 0 else 0
+
+        return MentionBucketStats(
+            bucket=bucket,
+            total_signals=len(bucket_signals),
+            accuracy_1d=accuracy_1d,
+            correct_1d=correct_1d,
+            incorrect_1d=incorrect_1d,
+            accuracy_5d=accuracy_5d,
+            correct_5d=correct_5d,
+            incorrect_5d=incorrect_5d,
+        )
+
     def _calculate_results(
         self,
         symbol: str,
@@ -347,6 +425,12 @@ class DirectionalBacktest:
         bullish_returns_5d = [s.return_5d for s in bullish if s.return_5d is not None]
         bearish_returns_5d = [s.return_5d for s in bearish if s.return_5d is not None]
 
+        # Calculate mention bucket stats
+        by_mention_bucket = {
+            bucket: self._calculate_bucket_stats(bucket, signals)
+            for bucket in ["low", "medium", "high"]
+        }
+
         return BacktestResult(
             symbol=symbol,
             start_date=start_date,
@@ -376,6 +460,7 @@ class DirectionalBacktest:
                 sum(bearish_returns_5d) / len(bearish_returns_5d)
                 if bearish_returns_5d else None
             ),
+            by_mention_bucket=by_mention_bucket,
             signals=signals,
         )
 
@@ -443,6 +528,32 @@ def summarize_results(results: dict[str, BacktestResult]) -> dict[str, Any]:
     total_1d = all_correct_1d + all_incorrect_1d
     total_5d = all_correct_5d + all_incorrect_5d
 
+    # Aggregate by mention bucket across all symbols
+    bucket_stats: dict[str, dict[str, int]] = {}
+    for bucket in ["low", "medium", "high"]:
+        bucket_stats[bucket] = {
+            "total": 0, "correct_1d": 0, "incorrect_1d": 0,
+            "correct_5d": 0, "incorrect_5d": 0,
+        }
+        for r in results.values():
+            if bucket in r.by_mention_bucket:
+                b = r.by_mention_bucket[bucket]
+                bucket_stats[bucket]["total"] += b.total_signals
+                bucket_stats[bucket]["correct_1d"] += b.correct_1d
+                bucket_stats[bucket]["incorrect_1d"] += b.incorrect_1d
+                bucket_stats[bucket]["correct_5d"] += b.correct_5d
+                bucket_stats[bucket]["incorrect_5d"] += b.incorrect_5d
+
+    by_mention_bucket = {}
+    for bucket, stats in bucket_stats.items():
+        t1d = stats["correct_1d"] + stats["incorrect_1d"]
+        t5d = stats["correct_5d"] + stats["incorrect_5d"]
+        by_mention_bucket[bucket] = {
+            "signals": stats["total"],
+            "accuracy1d": round(stats["correct_1d"] / t1d * 100, 1) if t1d > 0 else 0,
+            "accuracy5d": round(stats["correct_5d"] / t5d * 100, 1) if t5d > 0 else 0,
+        }
+
     return {
         "symbolCount": len(results),
         "totalSignals": all_signals,
@@ -460,6 +571,7 @@ def summarize_results(results: dict[str, BacktestResult]) -> dict[str, Any]:
             }
             for symbol, r in results.items()
         },
+        "byMentionBucket": by_mention_bucket,
     }
 
 
@@ -511,6 +623,16 @@ async def run_backtest_cli(
         print(f"    1-Day: {data['accuracy1d']}%")
         print(f"    5-Day: {data['accuracy5d']}%")
 
+    # Mention bucket analysis
+    print(f"\nBy Mention Volume:")
+    bucket_labels = {"low": "Low (1-5)", "medium": "Medium (6-20)", "high": "High (20+)"}
+    for bucket, data in summary.get("byMentionBucket", {}).items():
+        if data["signals"] > 0:
+            print(f"  {bucket_labels.get(bucket, bucket)}:")
+            print(f"    Signals: {data['signals']}")
+            print(f"    1-Day: {data['accuracy1d']}%")
+            print(f"    5-Day: {data['accuracy5d']}%")
+
     # Interpretation
     print("\n" + "=" * 50)
     overall = summary["overallAccuracy1d"]
@@ -522,6 +644,15 @@ async def run_backtest_cli(
         print("WEAK SIGNAL: Near random, limited predictive value.")
     else:
         print("CONTRARIAN SIGNAL: Inverse correlation detected!")
+
+    # Mention volume insight
+    buckets = summary.get("byMentionBucket", {})
+    if buckets.get("high", {}).get("signals", 0) > 0:
+        high_acc = buckets["high"]["accuracy1d"]
+        low_acc = buckets.get("low", {}).get("accuracy1d", 0)
+        if high_acc > low_acc + 5:
+            print(f"\nINSIGHT: High mention volume ({high_acc}%) outperforms low ({low_acc}%) by {high_acc - low_acc:.1f}%")
+            print("         Filtering for 5+ mentions should improve signal quality.")
 
 
 if __name__ == "__main__":
