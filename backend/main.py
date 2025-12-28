@@ -23,6 +23,7 @@ from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from backend.config import load_config
 from backend.data import AlpacaOptionsClient, DataAggregator, MockDataGenerator, ORATSClient, SubscriptionManager
@@ -917,39 +918,40 @@ async def get_positions() -> dict[str, Any]:
     }
 
 
+class OpenPositionRequest(BaseModel):
+    """Request body for opening a position."""
+    recommendation_id: str
+    fill_price: float
+    contracts: int = 1
+
+
 @app.post("/api/positions/open")
-async def open_position(
-    recommendation_id: str,
-    fill_price: float,
-    contracts: int = 1,
-) -> dict[str, Any]:
+async def open_position(request: OpenPositionRequest) -> dict[str, Any]:
     """Confirm a trade and open a tracked position.
 
     Args:
-        recommendation_id: ID of the recommendation being confirmed
-        fill_price: Actual fill price (may differ from displayed price)
-        contracts: Number of contracts (default 1)
+        request: OpenPositionRequest with recommendation_id, fill_price, contracts
 
     Returns:
         The created position
     """
     # Find the recommendation
     recs = session_tracker.get_recent_recommendations(50)
-    rec = next((r for r in recs if r.id == recommendation_id), None)
+    rec = next((r for r in recs if r.id == request.recommendation_id), None)
 
     if not rec:
-        return {"error": f"Recommendation not found: {recommendation_id}"}
+        return {"error": f"Recommendation not found: {request.recommendation_id}"}
 
     try:
         position = position_tracker.open_position(
-            recommendation_id=recommendation_id,
+            recommendation_id=request.recommendation_id,
             underlying=rec.underlying,
             expiry=rec.expiry,
             strike=rec.strike,
             right=rec.right,
             action=rec.action,
-            contracts=contracts,
-            fill_price=fill_price,
+            contracts=request.contracts,
+            fill_price=request.fill_price,
         )
 
         # Broadcast position update to all clients
@@ -972,18 +974,23 @@ async def open_position(
         return {"error": str(e)}
 
 
+class ClosePositionRequest(BaseModel):
+    """Request body for closing a position."""
+    close_price: float
+
+
 @app.post("/api/positions/{position_id}/close")
-async def close_position(position_id: str, close_price: float) -> dict[str, Any]:
+async def close_position(position_id: str, request: ClosePositionRequest) -> dict[str, Any]:
     """Close a tracked position.
 
     Args:
-        position_id: ID of position to close
-        close_price: Price at which position was closed
+        position_id: ID of position to close (path parameter)
+        request: ClosePositionRequest with close_price
 
     Returns:
         The closed position
     """
-    position = position_tracker.close_position(position_id, close_price)
+    position = position_tracker.close_position(position_id, request.close_price)
 
     if not position:
         return {"error": f"Position not found: {position_id}"}
