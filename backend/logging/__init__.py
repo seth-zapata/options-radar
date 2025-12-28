@@ -25,6 +25,15 @@ from backend.logging.metrics import (
     EvaluationMetrics,
     MetricsCalculator,
 )
+from backend.logging.replay import (
+    ExpectedDecision,
+    MarketTick,
+    ReplayComparator,
+    ReplayResult,
+    ReplaySession,
+    SessionRecorder,
+    SessionReplayer,
+)
 
 __all__ = [
     # Models
@@ -40,4 +49,12 @@ __all__ = [
     # Metrics
     "EvaluationMetrics",
     "MetricsCalculator",
+    # Replay
+    "ExpectedDecision",
+    "MarketTick",
+    "ReplayComparator",
+    "ReplayResult",
+    "ReplaySession",
+    "SessionRecorder",
+    "SessionReplayer",
 ]

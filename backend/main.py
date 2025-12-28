@@ -43,6 +43,8 @@ from backend.logging import (
     EvaluationMetrics,
     MetricsCalculator,
     Outcome,
+    SessionRecorder,
+    SessionReplayer,
 )
 from backend.models.market_data import UnderlyingData
 from backend.websocket import ConnectionManager
@@ -72,6 +74,8 @@ session_tracker = SessionTracker()
 position_tracker = PositionTracker()
 evaluation_logger = EvaluationLogger(persist_path="./logs/evaluations")
 metrics_calculator = MetricsCalculator()
+session_recorder = SessionRecorder(persist_path="./logs/replays")
+session_replayer = SessionReplayer(persist_path="./logs/replays")
 
 # Rate limiting: track last recommendation time per contract
 _last_recommendation_time: dict[str, float] = {}
@@ -1125,6 +1129,95 @@ async def get_evaluation_summary() -> dict[str, Any]:
             if evaluation_logger.log_count > 0 else 0
         ),
         "logsNeedingOutcome": len(evaluation_logger.get_logs_needing_outcome()),
+    }
+
+
+# ============================================================================
+# Replay API Endpoints
+# ============================================================================
+
+@app.get("/api/replay/sessions")
+async def list_replay_sessions(date: str | None = None) -> dict[str, Any]:
+    """List available replay sessions.
+
+    Args:
+        date: Filter by date (YYYY-MM-DD)
+
+    Returns:
+        List of session metadata
+    """
+    sessions = session_replayer.list_sessions(date=date)
+    return {
+        "sessions": sessions,
+        "count": len(sessions),
+    }
+
+
+@app.get("/api/replay/sessions/{date}/{session_id}")
+async def get_replay_session(date: str, session_id: str) -> dict[str, Any]:
+    """Get a specific replay session.
+
+    Args:
+        date: Date string (YYYY-MM-DD)
+        session_id: Session ID
+
+    Returns:
+        Full session data
+    """
+    session = session_replayer.load_session(date, session_id)
+    if not session:
+        return {"error": f"Session not found: {date}/{session_id}"}
+
+    return {
+        "session": session.to_dict(),
+    }
+
+
+@app.post("/api/replay/record/start")
+async def start_recording(
+    description: str = "",
+) -> dict[str, Any]:
+    """Start recording the current session for replay.
+
+    Args:
+        description: Optional description for this recording
+
+    Returns:
+        Recording session info
+    """
+    current_session_id = session_tracker.get_stats().session_id
+    symbols = ["SPY"]  # Currently only tracking SPY
+
+    session = session_recorder.start_session(
+        session_id=current_session_id,
+        symbols=symbols,
+        description=description,
+    )
+
+    return {
+        "recording": True,
+        "sessionId": session.session_id,
+        "startTime": session.start_time,
+    }
+
+
+@app.post("/api/replay/record/stop")
+async def stop_recording() -> dict[str, Any]:
+    """Stop recording and save the session.
+
+    Returns:
+        Saved session info
+    """
+    session = session_recorder.end_session()
+    if not session:
+        return {"error": "No active recording session"}
+
+    return {
+        "recording": False,
+        "sessionId": session.session_id,
+        "tickCount": len(session.market_ticks),
+        "decisionCount": len(session.expected_decisions),
+        "savedTo": f"./logs/replays/{session.start_time[:10]}/{session.session_id}.json",
     }
 
 
