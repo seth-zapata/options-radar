@@ -540,6 +540,9 @@ class QuiverClient:
     ) -> WSBSentiment | None:
         """Get WallStreetBets sentiment for a symbol.
 
+        Uses the historical/wallstreetbets/{ticker} endpoint which provides
+        daily mention counts, rank, and sentiment scores.
+
         Args:
             symbol: Stock symbol
 
@@ -547,49 +550,33 @@ class QuiverClient:
             WSBSentiment or None if not found
         """
         try:
-            # Get 24h data
-            data_24h = await self._request("mobile/24hwsbcounts", {"ticker": symbol})
-
-            # Get hottest/ranking data
-            data_hot = await self._request("mobile/24hwsbhottest")
+            # Use historical endpoint - gives daily data with mentions, rank, sentiment
+            data = await self._request(f"historical/wallstreetbets/{symbol}")
 
             now = datetime.now(timezone.utc)
 
-            # Parse 24h mentions
-            mentions_24h = 0
-            sentiment = 0.0
-
-            if data_24h and isinstance(data_24h, list) and len(data_24h) > 0:
-                for item in data_24h:
-                    if not item or not isinstance(item, dict):
-                        continue
-                    if item.get("Ticker", "").upper() == symbol.upper():
-                        mentions_24h = int(item.get("Count", 0) or 0)
-                        sentiment = float(item.get("Sentiment", 0) or 0)
-                        break
-
-            # Find rank in hottest
-            rank = 999
-            if data_hot and isinstance(data_hot, list):
-                for i, item in enumerate(data_hot):
-                    if not item or not isinstance(item, dict):
-                        continue
-                    if item.get("Ticker", "").upper() == symbol.upper():
-                        rank = i + 1
-                        # Use sentiment from hottest if we didn't get it above
-                        if sentiment == 0:
-                            sentiment = float(item.get("Sentiment", 0) or 0)
-                        break
-
-            # If no data found, return None
-            if mentions_24h == 0 and rank == 999:
+            if not data or not isinstance(data, list) or len(data) == 0:
                 logger.debug(f"No WSB data found for {symbol}")
                 return None
 
+            # Get most recent entry (last in the list)
+            latest = data[-1]
+
+            # Get mentions from today (or most recent day with data)
+            mentions_today = int(latest.get("Mentions", 0) or 0)
+            rank = int(latest.get("Rank", 999) or 999)
+            sentiment = float(latest.get("Sentiment", 0) or 0)
+
+            # Calculate 7-day mentions by summing last 7 entries
+            mentions_7d = sum(
+                int(entry.get("Mentions", 0) or 0)
+                for entry in data[-7:]
+            )
+
             wsb = WSBSentiment(
                 symbol=symbol,
-                mentions_24h=mentions_24h,
-                mentions_7d=mentions_24h * 7,  # Estimate (API doesn't give 7d directly)
+                mentions_24h=mentions_today,
+                mentions_7d=mentions_7d,
                 sentiment=sentiment,
                 rank=rank,
                 timestamp=now.isoformat(),
@@ -598,6 +585,7 @@ class QuiverClient:
             logger.info(
                 f"WSB sentiment for {symbol}: "
                 f"mentions={wsb.mentions_24h}, "
+                f"7d={wsb.mentions_7d}, "
                 f"sentiment={wsb.sentiment:.2f}, "
                 f"rank={wsb.rank}, "
                 f"buzz={wsb.buzz_level}"
