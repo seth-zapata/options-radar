@@ -38,6 +38,12 @@ from backend.engine import (
     TrackedPosition,
     evaluate_option_for_signal,
 )
+from backend.logging import (
+    EvaluationLogger,
+    EvaluationMetrics,
+    MetricsCalculator,
+    Outcome,
+)
 from backend.models.market_data import UnderlyingData
 from backend.websocket import ConnectionManager
 
@@ -64,6 +70,8 @@ mock_generator: MockDataGenerator | None = None
 recommender = Recommender()
 session_tracker = SessionTracker()
 position_tracker = PositionTracker()
+evaluation_logger = EvaluationLogger(persist_path="./logs/evaluations")
+metrics_calculator = MetricsCalculator()
 
 # Rate limiting: track last recommendation time per contract
 _last_recommendation_time: dict[str, float] = {}
@@ -415,14 +423,30 @@ async def gate_evaluation_loop() -> None:
             # Broadcast abstain status (null clears previous abstain)
             if result.abstain or best_option is None:
                 if result.abstain:
+                    failed_gates = [
+                        {"name": g.gate_name, "message": g.message}
+                        for g in result.all_results if not g.passed
+                    ]
                     await connection_manager.broadcast_abstain({
                         "reason": result.abstain.reason.value,
                         "resumeCondition": result.abstain.resume_condition,
-                        "failedGates": [
-                            {"name": g.gate_name, "message": g.message}
-                            for g in result.all_results if not g.passed
-                        ],
+                        "failedGates": failed_gates,
                     })
+
+                    # Log abstain for evaluation
+                    portfolio_state = {
+                        "total_exposure": position_tracker.get_total_exposure(),
+                        "open_position_count": len(position_tracker.get_open_positions()),
+                        "cash_available": 5000 - position_tracker.get_total_exposure(),
+                    }
+                    evaluation_logger.log_abstain(
+                        abstain=result.abstain,
+                        underlying=underlying,
+                        options=all_options,
+                        portfolio_state=portfolio_state,
+                        session_id=session_tracker.get_stats().session_id,
+                        failed_gates=failed_gates,
+                    )
                 # If best_option is None due to rate limiting, don't send abstain
             else:
                 # Best option found - generate recommendation with calculated confidence
@@ -476,6 +500,20 @@ async def gate_evaluation_loop() -> None:
                             "data": recommendation_to_dict(adjusted_rec),
                             "timestamp": now.isoformat(),
                         })
+
+                        # Log recommendation for evaluation
+                        portfolio_state = {
+                            "total_exposure": position_tracker.get_total_exposure(),
+                            "open_position_count": len(position_tracker.get_open_positions()),
+                            "cash_available": 5000 - position_tracker.get_total_exposure(),
+                        }
+                        evaluation_logger.log_recommendation(
+                            recommendation=adjusted_rec,
+                            underlying=underlying,
+                            options=all_options,
+                            portfolio_state=portfolio_state,
+                            session_id=session_tracker.get_stats().session_id,
+                        )
 
                         logger.info(
                             f"Recommendation: {adjusted_rec.action} "
@@ -1023,6 +1061,71 @@ async def close_position(position_id: str, request: ClosePositionRequest) -> dic
     })
 
     return {"position": position_to_dict(position)}
+
+
+# ============================================================================
+# Evaluation API Endpoints
+# ============================================================================
+
+@app.get("/api/evaluation/logs")
+async def get_evaluation_logs(
+    session_id: str | None = None,
+    decision_type: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Get evaluation log entries.
+
+    Args:
+        session_id: Filter by session ID
+        decision_type: Filter by "recommendation" or "abstain"
+        limit: Maximum entries to return
+
+    Returns:
+        List of log entries
+    """
+    logs = evaluation_logger.get_logs(
+        session_id=session_id,
+        decision_type=decision_type,
+        limit=limit,
+    )
+    return {
+        "logs": [log.to_dict() for log in logs],
+        "count": len(logs),
+        "totalInMemory": evaluation_logger.log_count,
+    }
+
+
+@app.get("/api/evaluation/metrics")
+async def get_evaluation_metrics(session_id: str | None = None) -> dict[str, Any]:
+    """Get calculated evaluation metrics.
+
+    Args:
+        session_id: Filter by session ID (default: all)
+
+    Returns:
+        EvaluationMetrics object
+    """
+    logs = evaluation_logger.get_logs(session_id=session_id)
+    metrics = metrics_calculator.calculate(logs)
+    return {
+        "metrics": metrics.to_dict(),
+        "logCount": len(logs),
+    }
+
+
+@app.get("/api/evaluation/summary")
+async def get_evaluation_summary() -> dict[str, Any]:
+    """Get a quick summary of evaluation state."""
+    return {
+        "totalLogs": evaluation_logger.log_count,
+        "recommendations": evaluation_logger.recommendation_count,
+        "abstains": evaluation_logger.abstain_count,
+        "abstentionRate": (
+            round(evaluation_logger.abstain_count / evaluation_logger.log_count * 100, 1)
+            if evaluation_logger.log_count > 0 else 0
+        ),
+        "logsNeedingOutcome": len(evaluation_logger.get_logs_needing_outcome()),
+    }
 
 
 @app.websocket("/ws")
