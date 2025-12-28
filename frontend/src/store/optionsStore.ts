@@ -3,7 +3,7 @@
  */
 
 import { create } from 'zustand';
-import type { OptionData, UnderlyingData, AbstainData, ConnectionStatus, GateResult } from '../types';
+import type { OptionData, UnderlyingData, AbstainData, ConnectionStatus, GateResult, Recommendation, SessionStatus } from '../types';
 import { optionKey } from '../types';
 
 export interface EvaluatedOption {
@@ -27,12 +27,18 @@ interface OptionsState {
   gateResults: GateResult[];
   evaluatedOption: EvaluatedOption | null;
 
+  // Recommendations
+  recommendations: Recommendation[];
+  sessionStatus: SessionStatus | null;
+
   // Actions
   setConnectionStatus: (status: ConnectionStatus) => void;
   updateOption: (option: OptionData) => void;
   updateUnderlying: (underlying: UnderlyingData) => void;
   setAbstain: (abstain: AbstainData | null) => void;
   setGateResults: (results: GateResult[], evaluatedOption?: EvaluatedOption) => void;
+  addRecommendation: (rec: Recommendation) => void;
+  setSessionStatus: (status: SessionStatus) => void;
   clearAll: () => void;
 }
 
@@ -45,6 +51,8 @@ export const useOptionsStore = create<OptionsState>((set) => ({
   abstain: null,
   gateResults: [],
   evaluatedOption: null,
+  recommendations: [],
+  sessionStatus: null,
 
   // Actions
   setConnectionStatus: (status) => set({ connectionStatus: status }),
@@ -70,12 +78,26 @@ export const useOptionsStore = create<OptionsState>((set) => ({
     evaluatedOption: evaluatedOption ?? null,
   }),
 
+  addRecommendation: (rec) => set((state) => {
+    // Check if recommendation already exists (by ID)
+    const exists = state.recommendations.some((r) => r.id === rec.id);
+    if (exists) return state;
+
+    // Add new recommendation to the front, keep last 20
+    const newRecs = [rec, ...state.recommendations].slice(0, 20);
+    return { recommendations: newRecs };
+  }),
+
+  setSessionStatus: (status) => set({ sessionStatus: status }),
+
   clearAll: () => set({
     options: new Map(),
     underlying: null,
     abstain: null,
     gateResults: [],
     evaluatedOption: null,
+    recommendations: [],
+    sessionStatus: null,
   }),
 }));
 

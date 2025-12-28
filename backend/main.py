@@ -27,7 +27,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.config import load_config
 from backend.data import AlpacaOptionsClient, DataAggregator, MockDataGenerator, ORATSClient, SubscriptionManager
 from backend.data.aggregator import AggregatedOptionData
-from backend.engine import GatingPipeline, PortfolioState, evaluate_option_for_signal
+from backend.engine import (
+    GatingPipeline,
+    PortfolioState,
+    Recommendation,
+    Recommender,
+    SessionTracker,
+    evaluate_option_for_signal,
+)
 from backend.models.market_data import UnderlyingData
 from backend.websocket import ConnectionManager
 
@@ -49,6 +56,14 @@ alpaca_client: AlpacaOptionsClient | None = None
 orats_client: ORATSClient | None = None
 subscription_manager: SubscriptionManager | None = None
 mock_generator: MockDataGenerator | None = None
+
+# Recommender and session tracking
+recommender = Recommender()
+session_tracker = SessionTracker()
+
+# Rate limiting: track last recommendation time per contract
+_last_recommendation_time: dict[str, float] = {}
+RECOMMENDATION_COOLDOWN = 60.0  # Don't recommend same contract within 60 seconds
 
 # Background tasks
 _background_tasks: set[asyncio.Task] = set()
@@ -108,6 +123,46 @@ def underlying_to_dict(underlying: UnderlyingData) -> dict[str, Any]:
     }
 
 
+def recommendation_to_dict(rec: Recommendation) -> dict[str, Any]:
+    """Convert Recommendation to JSON-serializable dict."""
+    return {
+        "id": rec.id,
+        "generatedAt": rec.generated_at,
+        "underlying": rec.underlying,
+        "action": rec.action,
+        "strike": rec.strike,
+        "expiry": rec.expiry,
+        "right": rec.right,
+        "contracts": rec.contracts,
+        "premium": rec.premium,
+        "totalCost": rec.total_cost,
+        "confidence": rec.confidence,
+        "rationale": rec.rationale,
+        "gateResults": list(rec.gate_results),
+        "quoteAge": rec.quote_age,
+        "greeksAge": rec.greeks_age,
+        "underlyingAge": rec.underlying_age,
+        "validUntil": rec.valid_until,
+    }
+
+
+def session_stats_to_dict() -> dict[str, Any]:
+    """Get current session stats as JSON-serializable dict."""
+    stats = session_tracker.get_stats()
+    return {
+        "sessionId": stats.session_id,
+        "startedAt": stats.started_at,
+        "recommendationCount": stats.recommendation_count,
+        "totalExposure": stats.total_exposure,
+        "exposureRemaining": stats.exposure_remaining,
+        "exposurePercent": stats.exposure_percent,
+        "isAtLimit": stats.is_at_limit,
+        "isWarning": stats.is_warning,
+        "recommendationsBySymbol": stats.recommendations_by_symbol,
+        "lastRecommendationAt": stats.last_recommendation_at,
+    }
+
+
 async def on_option_update(option: AggregatedOptionData) -> None:
     """Callback when option data updates - broadcast to clients."""
     try:
@@ -122,9 +177,93 @@ async def on_underlying_update(underlying: UnderlyingData) -> None:
     await connection_manager.broadcast_underlying_update(underlying_to_dict(underlying))
 
 
+def score_option_candidate(
+    option: AggregatedOptionData,
+    underlying: UnderlyingData,
+) -> tuple[float, int]:
+    """Score an option for recommendation quality.
+
+    Returns (score, confidence) where:
+    - score: 0-100, higher is better candidate
+    - confidence: 0-100, how confident we are in this recommendation
+
+    Scoring factors:
+    - Delta: 0.25-0.45 is ideal for directional plays (not too aggressive, not too conservative)
+    - Spread: Tighter spreads are better
+    - IV rank alignment: Low IV for buying premium
+    - Time to expiry: 14-45 DTE is ideal
+    """
+    score = 50.0  # Base score
+    confidence = 70  # Base confidence
+
+    # Delta scoring (ideal: 0.30-0.40 for calls, -0.40 to -0.30 for puts)
+    if option.delta is not None:
+        abs_delta = abs(option.delta)
+        if 0.30 <= abs_delta <= 0.40:
+            score += 20  # Ideal range
+            confidence += 15
+        elif 0.25 <= abs_delta <= 0.45:
+            score += 10  # Good range
+            confidence += 8
+        elif 0.20 <= abs_delta <= 0.50:
+            score += 5  # Acceptable
+            confidence += 3
+        else:
+            score -= 10  # Too aggressive or too conservative
+            confidence -= 10
+
+    # Spread scoring (tighter is better)
+    if option.spread_percent is not None:
+        if option.spread_percent < 2:
+            score += 15
+            confidence += 10
+        elif option.spread_percent < 5:
+            score += 10
+            confidence += 5
+        elif option.spread_percent < 8:
+            score += 5
+        else:
+            score -= 5
+            confidence -= 5
+
+    # IV rank scoring (for buying premium, lower IV is better)
+    if underlying.iv_rank is not None:
+        if underlying.iv_rank < 30:
+            score += 15
+            confidence += 10
+        elif underlying.iv_rank < 50:
+            score += 8
+            confidence += 5
+        else:
+            score -= 5
+            confidence -= 5
+
+    # Premium scoring (not too cheap, not too expensive)
+    if option.mid is not None:
+        if 2.0 <= option.mid <= 8.0:
+            score += 10
+            confidence += 5
+        elif 1.0 <= option.mid <= 15.0:
+            score += 5
+        else:
+            score -= 5
+
+    # Clamp values
+    score = max(0, min(100, score))
+    confidence = max(40, min(95, confidence))  # Never 100%, never below 40%
+
+    return (score, confidence)
+
+
+def get_option_key(option: AggregatedOptionData) -> str:
+    """Get unique key for rate-limiting."""
+    cid = option.canonical_id
+    return f"{cid.underlying}-{cid.expiry}-{cid.strike}-{cid.right}"
+
+
 async def gate_evaluation_loop() -> None:
     """Background task to periodically evaluate gates and broadcast results."""
-    global mock_generator, aggregator
+    global mock_generator, aggregator, _last_recommendation_time
 
     logger.info("Starting gate evaluation loop (5s interval)")
 
@@ -134,29 +273,76 @@ async def gate_evaluation_loop() -> None:
 
             # Get options and underlying
             if mock_generator:
-                options = mock_generator.get_all_options()
+                all_options = mock_generator.get_all_options()
                 underlying = mock_generator.get_underlying()
             elif aggregator:
-                options = aggregator.get_all_options()
+                all_options = aggregator.get_all_options()
                 underlying = aggregator.get_underlying("NVDA")
             else:
                 continue
 
-            if not options or not underlying:
+            if not all_options or not underlying:
                 continue
 
-            # Find ATM option (closest to underlying price)
-            atm_option = min(
-                options,
-                key=lambda o: abs(o.canonical_id.strike - underlying.price)
-            )
+            now = datetime.now(timezone.utc)
+            now_ts = now.timestamp()
 
-            # Evaluate gates
-            result = evaluate_option_for_signal(
-                option=atm_option,
-                underlying=underlying,
-                action="BUY_CALL" if atm_option.canonical_id.right == "C" else "BUY_PUT",
-            )
+            # Filter to calls only for BUY_CALL evaluation
+            # Get options within reasonable strike range (ATM +/- 5 strikes)
+            atm_strike = round(underlying.price / 2.5) * 2.5
+            candidates = [
+                o for o in all_options
+                if o.canonical_id.right == "C"
+                and abs(o.canonical_id.strike - atm_strike) <= 12.5  # Within 5 strikes
+            ]
+
+            if not candidates:
+                continue
+
+            # Score all candidates and find the best one that passes gates
+            best_option = None
+            best_result = None
+            best_score = -1
+            best_confidence = 0
+
+            for option in candidates:
+                # Check rate limiting
+                option_key = get_option_key(option)
+                last_rec_time = _last_recommendation_time.get(option_key, 0)
+                if now_ts - last_rec_time < RECOMMENDATION_COOLDOWN:
+                    continue  # Skip, recently recommended
+
+                # Score the option
+                score, confidence = score_option_candidate(option, underlying)
+
+                # Evaluate gates
+                result = evaluate_option_for_signal(
+                    option=option,
+                    underlying=underlying,
+                    action="BUY_CALL",
+                )
+
+                if result.passed and score > best_score:
+                    best_option = option
+                    best_result = result
+                    best_score = score
+                    best_confidence = confidence
+
+            # If no passing candidate, just evaluate ATM for display
+            if best_option is None:
+                atm_option = min(
+                    candidates,
+                    key=lambda o: abs(o.canonical_id.strike - underlying.price)
+                )
+                result = evaluate_option_for_signal(
+                    option=atm_option,
+                    underlying=underlying,
+                    action="BUY_CALL",
+                )
+                display_option = atm_option
+            else:
+                result = best_result
+                display_option = best_option
 
             # Format gate results for frontend
             gate_results = [
@@ -176,34 +362,103 @@ async def gate_evaluation_loop() -> None:
                 "data": {
                     "gates": gate_results,
                     "evaluatedOption": {
-                        "strike": atm_option.canonical_id.strike,
-                        "right": atm_option.canonical_id.right,
-                        "expiry": atm_option.canonical_id.expiry,
-                        "premium": atm_option.mid,
+                        "strike": display_option.canonical_id.strike,
+                        "right": display_option.canonical_id.right,
+                        "expiry": display_option.canonical_id.expiry,
+                        "premium": display_option.mid,
                     },
                 },
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": now.isoformat(),
             })
 
             # Broadcast abstain status (null clears previous abstain)
-            if result.abstain:
-                await connection_manager.broadcast_abstain({
-                    "reason": result.abstain.reason.value,
-                    "resumeCondition": result.abstain.resume_condition,
-                    "failedGates": [
-                        {"name": g.gate_name, "message": g.message}
-                        for g in result.all_results if not g.passed
-                    ],
-                })
+            if result.abstain or best_option is None:
+                if result.abstain:
+                    await connection_manager.broadcast_abstain({
+                        "reason": result.abstain.reason.value,
+                        "resumeCondition": result.abstain.resume_condition,
+                        "failedGates": [
+                            {"name": g.gate_name, "message": g.message}
+                            for g in result.all_results if not g.passed
+                        ],
+                    })
+                # If best_option is None due to rate limiting, don't send abstain
             else:
-                # All gates passed - clear abstain
+                # Best option found - generate recommendation with calculated confidence
                 await connection_manager.broadcast_abstain(None)
+
+                # Override confidence in the result for the recommender
+                # We do this by generating with the result then adjusting
+                recommendation = recommender.generate(
+                    result=best_result,
+                    option=best_option,
+                    underlying=underlying,
+                    action="BUY_CALL",
+                )
+
+                if recommendation:
+                    # Create new recommendation with adjusted confidence
+                    from backend.engine.recommender import Recommendation
+                    adjusted_rec = Recommendation(
+                        id=recommendation.id,
+                        generated_at=recommendation.generated_at,
+                        underlying=recommendation.underlying,
+                        action=recommendation.action,
+                        strike=recommendation.strike,
+                        expiry=recommendation.expiry,
+                        right=recommendation.right,
+                        contracts=recommendation.contracts,
+                        premium=recommendation.premium,
+                        total_cost=recommendation.total_cost,
+                        confidence=best_confidence,  # Use our calculated confidence
+                        rationale=recommendation.rationale,
+                        gate_results=recommendation.gate_results,
+                        quote_age=recommendation.quote_age,
+                        greeks_age=recommendation.greeks_age,
+                        underlying_age=recommendation.underlying_age,
+                        valid_until=recommendation.valid_until,
+                    )
+
+                    # Check session limits
+                    allowed, reason = session_tracker.can_add_recommendation(adjusted_rec)
+
+                    if allowed:
+                        # Record recommendation time for rate limiting
+                        option_key = get_option_key(best_option)
+                        _last_recommendation_time[option_key] = now_ts
+
+                        # Add to session and broadcast
+                        session_tracker.add_recommendation(adjusted_rec)
+
+                        await connection_manager.broadcast({
+                            "type": "recommendation",
+                            "data": recommendation_to_dict(adjusted_rec),
+                            "timestamp": now.isoformat(),
+                        })
+
+                        logger.info(
+                            f"Recommendation: {adjusted_rec.action} "
+                            f"{adjusted_rec.underlying} ${adjusted_rec.strike} "
+                            f"@ ${adjusted_rec.premium:.2f} "
+                            f"(score: {best_score:.0f}, conf: {best_confidence}%)"
+                        )
+                    else:
+                        logger.warning(f"Recommendation blocked: {reason}")
+
+                # Always broadcast session stats after evaluation
+                await connection_manager.broadcast({
+                    "type": "session_status",
+                    "data": session_stats_to_dict(),
+                    "timestamp": now.isoformat(),
+                })
 
         except asyncio.CancelledError:
             logger.info("Gate evaluation loop cancelled")
             break
         except Exception as e:
             logger.error(f"Error in gate evaluation: {e}")
+            import traceback
+            traceback.print_exc()
             await asyncio.sleep(5)
 
 
@@ -593,6 +848,22 @@ async def evaluate_gates(symbol: str) -> dict[str, Any]:
     return {"evaluations": results}
 
 
+@app.get("/api/session")
+async def get_session_status() -> dict[str, Any]:
+    """Get current session tracking status."""
+    return session_stats_to_dict()
+
+
+@app.get("/api/recommendations")
+async def get_recommendations(limit: int = 10) -> dict[str, Any]:
+    """Get recent recommendations from the session."""
+    recs = session_tracker.get_recent_recommendations(limit)
+    return {
+        "recommendations": [recommendation_to_dict(r) for r in recs],
+        "session": session_stats_to_dict(),
+    }
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     """WebSocket endpoint for real-time updates."""
@@ -645,6 +916,28 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
                 )
+
+        # Send initial session status
+        await connection_manager._send_to_client(
+            websocket,
+            {
+                "type": "session_status",
+                "data": session_stats_to_dict(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+        # Send recent recommendations
+        recent_recs = session_tracker.get_recent_recommendations(10)
+        for rec in recent_recs:
+            await connection_manager._send_to_client(
+                websocket,
+                {
+                    "type": "recommendation",
+                    "data": recommendation_to_dict(rec),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
 
         # Keep connection alive with ping/pong and handle client messages
         while True:

@@ -4,7 +4,7 @@
 
 import { useEffect, useRef } from 'react';
 import { useOptionsStore, EvaluatedOption } from '../store/optionsStore';
-import type { OptionData, UnderlyingData, WebSocketMessage, GateResult, AbstainData } from '../types';
+import type { OptionData, UnderlyingData, WebSocketMessage, GateResult, AbstainData, Recommendation, SessionStatus } from '../types';
 
 const WS_URL = import.meta.env.PROD
   ? `wss://${window.location.host}/ws`
@@ -27,6 +27,8 @@ export function useOptionsStream() {
   const updateUnderlying = useOptionsStore((state) => state.updateUnderlying);
   const setAbstain = useOptionsStore((state) => state.setAbstain);
   const setGateResults = useOptionsStore((state) => state.setGateResults);
+  const addRecommendation = useOptionsStore((state) => state.addRecommendation);
+  const setSessionStatus = useOptionsStore((state) => state.setSessionStatus);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -153,6 +155,14 @@ export function useOptionsStream() {
                 setAbstain(message.data as AbstainData);
                 break;
 
+              case 'recommendation':
+                addRecommendation(message.data as Recommendation);
+                break;
+
+              case 'session_status':
+                setSessionStatus(message.data as SessionStatus);
+                break;
+
               case 'connection_status':
                 // Server confirmed connection
                 break;
@@ -189,5 +199,5 @@ export function useOptionsStream() {
       cleanup();
       setConnectionStatus('disconnected');
     };
-  }, [setConnectionStatus, updateOption, updateUnderlying, setAbstain, setGateResults]);
+  }, [setConnectionStatus, updateOption, updateUnderlying, setAbstain, setGateResults, addRecommendation, setSessionStatus]);
 }

@@ -54,10 +54,51 @@ export interface AbstainData {
   failedGates: GateResult[];
 }
 
+export type TradeAction = 'BUY_CALL' | 'BUY_PUT' | 'SELL_CALL' | 'SELL_PUT';
+
+export interface RecommendationGateResult {
+  name: string;
+  passed: boolean;
+  message: string;
+}
+
+export interface Recommendation {
+  id: string;
+  generatedAt: string;
+  underlying: string;
+  action: TradeAction;
+  strike: number;
+  expiry: string;
+  right: 'C' | 'P';
+  contracts: number;
+  premium: number;
+  totalCost: number;
+  confidence: number;
+  rationale: string;
+  gateResults: RecommendationGateResult[];
+  quoteAge: number | null;
+  greeksAge: number | null;
+  underlyingAge: number | null;
+  validUntil: string;
+}
+
+export interface SessionStatus {
+  sessionId: string;
+  startedAt: string;
+  recommendationCount: number;
+  totalExposure: number;
+  exposureRemaining: number;
+  exposurePercent: number;
+  isAtLimit: boolean;
+  isWarning: boolean;
+  recommendationsBySymbol: Record<string, number>;
+  lastRecommendationAt: string | null;
+}
+
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
 
 export interface WebSocketMessage {
-  type: 'option_update' | 'underlying_update' | 'gate_status' | 'abstain' | 'connection_status' | 'error' | 'ping';
+  type: 'option_update' | 'underlying_update' | 'gate_status' | 'abstain' | 'connection_status' | 'error' | 'ping' | 'recommendation' | 'session_status';
   data?: unknown;
   timestamp?: string;
 }

@@ -43,6 +43,16 @@ from backend.engine.pipeline import (
     PortfolioState,
     evaluate_option_for_signal,
 )
+from backend.engine.recommender import (
+    Recommendation,
+    Recommender,
+    RecommenderConfig,
+)
+from backend.engine.session_tracker import (
+    SessionConfig,
+    SessionStats,
+    SessionTracker,
+)
 
 __all__ = [
     # Gate types
@@ -79,4 +89,12 @@ __all__ = [
     "PipelineStage",
     "PortfolioState",
     "evaluate_option_for_signal",
+    # Recommender
+    "Recommendation",
+    "Recommender",
+    "RecommenderConfig",
+    # Session Tracker
+    "SessionConfig",
+    "SessionStats",
+    "SessionTracker",
 ]

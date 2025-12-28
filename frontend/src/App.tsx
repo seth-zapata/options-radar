@@ -3,13 +3,22 @@
  */
 
 import { useOptionsStream } from './hooks/useOptionsStream';
+import { useOptionsStore } from './store/optionsStore';
 import { StatusBar } from './components/StatusBar';
 import { ChainView } from './components/ChainView';
 import { AbstainPanel } from './components/AbstainPanel';
+import { RecommendationsPanel } from './components/RecommendationsPanel';
 
 function App() {
   // Connect to WebSocket
   useOptionsStream();
+
+  // Get abstain state to determine which panel to show
+  const abstain = useOptionsStore((state) => state.abstain);
+  const recommendations = useOptionsStore((state) => state.recommendations);
+
+  // Show AbstainPanel only when abstaining AND we have no recommendations yet
+  const showAbstainPanel = abstain && recommendations.length === 0;
 
   return (
     <div className="min-h-screen bg-slate-100">
@@ -22,9 +31,13 @@ function App() {
             <ChainView />
           </div>
 
-          {/* Abstain Panel - 1 column */}
-          <div>
-            <AbstainPanel />
+          {/* Right side panels - 1 column */}
+          <div className="space-y-4">
+            {/* Primary: Trade Signals */}
+            <RecommendationsPanel />
+
+            {/* Secondary: Only show when abstaining with no signals */}
+            {showAbstainPanel && <AbstainPanel />}
           </div>
         </div>
       </main>
