@@ -73,8 +73,8 @@ class AppConfig:
     quiver: QuiverConfig
     log_level: str
 
-    # MVP watchlist
-    watchlist: tuple[str, ...] = ("NVDA",)
+    # Watchlist - Phase 6 expanded
+    watchlist: tuple[str, ...] = ("NVDA", "QQQ", "AAPL", "TSLA", "SPY", "AMD", "GOOGL", "AMZN", "META", "MSFT")
 
     # Staleness thresholds (seconds)
     quote_stale_threshold: float = 5.0

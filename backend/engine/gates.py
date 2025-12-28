@@ -128,6 +128,14 @@ class GateContext:
     current_sector_exposure_percent: float = 0.0
     new_position_percent: float = 0.0
 
+    # Sentiment data (Phase 6) - News + WSB only
+    news_sentiment_score: float | None = None  # -100 to 100 (Finnhub)
+    wsb_sentiment_score: float | None = None  # -100 to 100 (Quiver WSB)
+    combined_sentiment_score: float | None = None  # 50/50 weighted combined score
+    wsb_is_trending: bool = False
+    news_is_buzzing: bool = False
+    sources_aligned: bool = False  # True if news and WSB agree on direction
+
 
 class Gate(ABC):
     """Abstract base class for gates.
@@ -530,10 +538,157 @@ class SectorConcentrationGate(Gate):
 
 
 # =============================================================================
+# Stage 5: Sentiment Gates (all SOFT - sentiment enhances but doesn't block)
+# =============================================================================
+
+class SentimentDirectionGate(Gate):
+    """Checks if sentiment aligns with trade direction. SOFT gate.
+
+    For bullish trades (BUY_CALL, SELL_PUT): Combined sentiment should be > -30
+    For bearish trades (BUY_PUT, SELL_CALL): Combined sentiment should be < 30
+    """
+
+    @property
+    def name(self) -> str:
+        return "sentiment_direction"
+
+    @property
+    def severity(self) -> GateSeverity:
+        return GateSeverity.SOFT
+
+    def evaluate(self, ctx: GateContext) -> GateResult:
+        if ctx.combined_sentiment_score is None:
+            return GateResult(
+                gate_name=self.name,
+                passed=True,  # Pass if no sentiment data (don't block on missing data)
+                value=None,
+                threshold="N/A",
+                message="No sentiment data available (skipped)",
+                severity=self.severity,
+            )
+
+        is_bullish_trade = ctx.action in ("BUY_CALL", "SELL_PUT")
+
+        if is_bullish_trade:
+            passed = ctx.combined_sentiment_score > -30
+            threshold = "> -30"
+        else:
+            passed = ctx.combined_sentiment_score < 30
+            threshold = "< 30"
+
+        return GateResult(
+            gate_name=self.name,
+            passed=passed,
+            value=ctx.combined_sentiment_score,
+            threshold=threshold,
+            message="OK" if passed else f"Sentiment {ctx.combined_sentiment_score:.0f} conflicts with {ctx.action}",
+            severity=self.severity,
+        )
+
+
+class RetailMomentumGate(Gate):
+    """Checks WSB/retail momentum. SOFT gate.
+
+    If WSB is trending and strongly bullish/bearish, can be a momentum signal.
+    This is a "nice to have" confirmation, not a blocker.
+    """
+
+    @property
+    def name(self) -> str:
+        return "retail_momentum"
+
+    @property
+    def severity(self) -> GateSeverity:
+        return GateSeverity.SOFT
+
+    def evaluate(self, ctx: GateContext) -> GateResult:
+        if ctx.wsb_sentiment_score is None:
+            return GateResult(
+                gate_name=self.name,
+                passed=True,
+                value=None,
+                threshold="N/A",
+                message="No WSB sentiment data (skipped)",
+                severity=self.severity,
+            )
+
+        is_bullish_trade = ctx.action in ("BUY_CALL", "SELL_PUT")
+
+        # If WSB is trending, check if direction aligns
+        if ctx.wsb_is_trending:
+            if is_bullish_trade:
+                passed = ctx.wsb_sentiment_score > -20  # Not strongly bearish
+            else:
+                passed = ctx.wsb_sentiment_score < 20  # Not strongly bullish
+        else:
+            # Not trending = no strong retail conviction, so pass
+            passed = True
+
+        return GateResult(
+            gate_name=self.name,
+            passed=passed,
+            value=ctx.wsb_sentiment_score,
+            threshold="aligned when trending",
+            message="OK" if passed else f"Trending WSB sentiment conflicts with {ctx.action}",
+            severity=self.severity,
+        )
+
+
+class SentimentConvergenceGate(Gate):
+    """Bonus gate: News and WSB sentiment agree. SOFT gate.
+
+    When both sources point the same direction (bullish or bearish),
+    this provides extra confidence in the trade direction.
+    """
+
+    @property
+    def name(self) -> str:
+        return "sentiment_convergence"
+
+    @property
+    def severity(self) -> GateSeverity:
+        return GateSeverity.SOFT
+
+    def evaluate(self, ctx: GateContext) -> GateResult:
+        # Need both sources for convergence check
+        if ctx.news_sentiment_score is None or ctx.wsb_sentiment_score is None:
+            return GateResult(
+                gate_name=self.name,
+                passed=True,
+                value=None,
+                threshold="both sources needed",
+                message="Missing sentiment source (skipped)",
+                severity=self.severity,
+            )
+
+        # Check if sources are aligned (both bullish or both bearish)
+        # This is informational - always passes but message indicates alignment
+        if ctx.sources_aligned:
+            message = "News and WSB sentiment aligned"
+        else:
+            message = "News and WSB divergent (mixed signals)"
+
+        return GateResult(
+            gate_name=self.name,
+            passed=True,  # Informational, not a blocker
+            value=ctx.sources_aligned,
+            threshold="sources aligned",
+            message=message,
+            severity=self.severity,
+        )
+
+
+# =============================================================================
 # Gate Registry
 # =============================================================================
 
 # All gates organized by pipeline stage
+SENTIMENT_GATES: list[Gate] = [
+    SentimentDirectionGate(),
+    RetailMomentumGate(),
+    SentimentConvergenceGate(),
+]
+
 DATA_FRESHNESS_GATES: list[Gate] = [
     UnderlyingPriceFreshGate(),
     QuoteFreshGate(),
@@ -562,7 +717,8 @@ ALL_GATES: list[Gate] = (
     DATA_FRESHNESS_GATES +
     LIQUIDITY_GATES +
     STRATEGY_FIT_GATES +
-    PORTFOLIO_CONSTRAINT_GATES
+    PORTFOLIO_CONSTRAINT_GATES +
+    SENTIMENT_GATES
 )
 
 

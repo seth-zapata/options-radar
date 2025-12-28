@@ -17,6 +17,7 @@ from backend.engine.gates import (
     GateSeverity,
     LIQUIDITY_GATES,
     PORTFOLIO_CONSTRAINT_GATES,
+    SENTIMENT_GATES,
     STRATEGY_FIT_GATES,
     get_hard_gates,
     get_soft_gates,
@@ -28,7 +29,10 @@ from backend.engine.gates import (
     OpenInterestSufficientGate,
     PositionSizeLimitGate,
     QuoteFreshGate,
+    RetailMomentumGate,
     SectorConcentrationGate,
+    SentimentConvergenceGate,
+    SentimentDirectionGate,
     SpreadAcceptableGate,
     UnderlyingPriceFreshGate,
     VolumeSufficientGate,
@@ -59,6 +63,10 @@ from backend.engine.position_tracker import (
     PositionTrackerConfig,
     TrackedPosition,
 )
+from backend.engine.scanner import (
+    DailyScanner,
+    ScanResult,
+)
 
 __all__ = [
     # Gate types
@@ -70,8 +78,9 @@ __all__ = [
     "ALL_GATES",
     "DATA_FRESHNESS_GATES",
     "LIQUIDITY_GATES",
-    "STRATEGY_FIT_GATES",
     "PORTFOLIO_CONSTRAINT_GATES",
+    "SENTIMENT_GATES",
+    "STRATEGY_FIT_GATES",
     "get_hard_gates",
     "get_soft_gates",
     # Individual gates
@@ -82,7 +91,10 @@ __all__ = [
     "OpenInterestSufficientGate",
     "PositionSizeLimitGate",
     "QuoteFreshGate",
+    "RetailMomentumGate",
     "SectorConcentrationGate",
+    "SentimentConvergenceGate",
+    "SentimentDirectionGate",
     "SpreadAcceptableGate",
     "UnderlyingPriceFreshGate",
     "VolumeSufficientGate",
@@ -108,4 +120,7 @@ __all__ = [
     "PositionTracker",
     "PositionTrackerConfig",
     "TrackedPosition",
+    # Scanner
+    "DailyScanner",
+    "ScanResult",
 ]

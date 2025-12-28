@@ -1,10 +1,28 @@
 """Data clients for OptionsRadar."""
 
 from backend.data.aggregator import AggregatedOptionData, DataAggregator
+from backend.data.alpaca_account import (
+    AccountInfo,
+    AlpacaAccountClient,
+    PortfolioSummary,
+    Position,
+)
 from backend.data.alpaca_client import AlpacaOptionsClient, ConnectionState
+from backend.data.finnhub_client import FinnhubClient, NewsSentiment, CompanyNews
 from backend.data.market_hours import MarketStatus, check_market_hours, CT, ET
 from backend.data.mock_data import MockDataGenerator
 from backend.data.orats_client import ORATSClient
+from backend.data.quiver_client import (
+    QuiverClient,
+    CongressTrade,
+    InsiderTrade,
+    PoliticalSentiment,
+    WSBSentiment,
+)
+from backend.data.sentiment_aggregator import (
+    CombinedSentiment,
+    SentimentAggregator,
+)
 from backend.data.staleness import (
     FreshnessLevel,
     FreshnessReport,
@@ -14,19 +32,33 @@ from backend.data.staleness import (
 from backend.data.subscription_manager import SubscriptionManager
 
 __all__ = [
+    "AccountInfo",
     "AggregatedOptionData",
+    "AlpacaAccountClient",
     "AlpacaOptionsClient",
+    "CombinedSentiment",
+    "CompanyNews",
+    "CongressTrade",
     "ConnectionState",
     "CT",
     "DataAggregator",
     "ET",
+    "FinnhubClient",
     "FreshnessLevel",
     "FreshnessReport",
+    "InsiderTrade",
     "MarketStatus",
     "MockDataGenerator",
+    "NewsSentiment",
     "ORATSClient",
+    "PoliticalSentiment",
+    "PortfolioSummary",
+    "Position",
+    "QuiverClient",
+    "SentimentAggregator",
     "StalenessChecker",
     "StalenessThresholds",
     "SubscriptionManager",
+    "WSBSentiment",
     "check_market_hours",
 ]
