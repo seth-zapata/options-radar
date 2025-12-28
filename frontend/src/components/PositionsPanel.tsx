@@ -128,7 +128,13 @@ function PositionCard({ position }: { position: TrackedPosition }) {
         {/* Close Button */}
         {position.status === 'open' && (
           <button
-            onClick={() => setShowCloseModal(true)}
+            onClick={() => {
+              // Auto-fill with current price when opening modal
+              if (position.currentPrice) {
+                setClosePrice(position.currentPrice.toFixed(2));
+              }
+              setShowCloseModal(true);
+            }}
             className="w-full mt-2 py-1.5 bg-slate-200 hover:bg-slate-300 rounded text-sm font-medium text-slate-700"
           >
             Close Position
