@@ -371,6 +371,15 @@ async def gate_evaluation_loop() -> None:
                 if not all_options or not underlying:
                     continue
 
+                # Fetch sentiment data for this symbol
+                sentiment = None
+                try:
+                    scanner = get_scanner()
+                    if scanner._sentiment_aggregator:
+                        sentiment = await scanner._sentiment_aggregator.get_sentiment(symbol)
+                except Exception as e:
+                    logger.debug(f"Error fetching sentiment for {symbol}: {e}")
+
                 # Filter to calls only for BUY_CALL evaluation
                 # Get options within reasonable strike range (ATM +/- 5 strikes)
                 atm_strike = round(underlying.price / 2.5) * 2.5
@@ -399,11 +408,12 @@ async def gate_evaluation_loop() -> None:
                     # Score the option
                     score, confidence = score_option_candidate(option, underlying)
 
-                    # Evaluate gates
+                    # Evaluate gates with sentiment data
                     result = evaluate_option_for_signal(
                         option=option,
                         underlying=underlying,
                         action="BUY_CALL",
+                        sentiment=sentiment,
                     )
 
                     if result.passed and score > best_score:
@@ -423,6 +433,7 @@ async def gate_evaluation_loop() -> None:
                             option=atm_option,
                             underlying=underlying,
                             action="BUY_CALL",
+                            sentiment=sentiment,
                         )
                         display_option = atm_option
                     else:
@@ -1028,12 +1039,22 @@ async def evaluate_gates(symbol: str) -> dict[str, Any]:
     options = aggregator.get_options_for_underlying(symbol)
     underlying = aggregator.get_underlying(symbol)
 
+    # Fetch sentiment for this symbol
+    sentiment = None
+    try:
+        scanner = get_scanner()
+        if scanner._sentiment_aggregator:
+            sentiment = await scanner._sentiment_aggregator.get_sentiment(symbol)
+    except Exception as e:
+        logger.debug(f"Error fetching sentiment for {symbol}: {e}")
+
     results = []
     for option in options[:5]:  # Limit for demo
         result = evaluate_option_for_signal(
             option=option,
             underlying=underlying,
             action="BUY_CALL" if option.canonical_id.right == "C" else "BUY_PUT",
+            sentiment=sentiment,
         )
 
         gate_results = [

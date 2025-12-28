@@ -20,6 +20,7 @@ from enum import Enum
 from typing import Literal
 
 from backend.data.aggregator import AggregatedOptionData
+from backend.data.sentiment_aggregator import CombinedSentiment
 from backend.engine.gates import (
     ALL_GATES,
     DATA_FRESHNESS_GATES,
@@ -184,6 +185,7 @@ class GatingPipeline:
         action: Literal["BUY_CALL", "BUY_PUT", "SELL_CALL", "SELL_PUT"],
         contracts: int = 1,
         portfolio: PortfolioState | None = None,
+        sentiment: CombinedSentiment | None = None,
     ) -> PipelineResult:
         """Run the full gating pipeline for an option.
 
@@ -193,6 +195,7 @@ class GatingPipeline:
             action: Trade action to evaluate
             contracts: Number of contracts
             portfolio: Current portfolio state
+            sentiment: Combined sentiment data from news + WSB
 
         Returns:
             PipelineResult with pass/fail and details
@@ -201,7 +204,7 @@ class GatingPipeline:
             portfolio = PortfolioState()
 
         # Build gate context
-        ctx = self._build_context(option, underlying, action, contracts, portfolio)
+        ctx = self._build_context(option, underlying, action, contracts, portfolio, sentiment)
 
         # Track results
         all_results: list[GateResult] = []
@@ -292,6 +295,7 @@ class GatingPipeline:
         action: Literal["BUY_CALL", "BUY_PUT", "SELL_CALL", "SELL_PUT"],
         contracts: int,
         portfolio: PortfolioState,
+        sentiment: CombinedSentiment | None = None,
     ) -> GateContext:
         """Build gate context from option and portfolio data."""
         now = datetime.now(timezone.utc)
@@ -308,6 +312,36 @@ class GatingPipeline:
         # Get sector exposure (for now, treat each underlying as its own sector)
         underlying_symbol = option.canonical_id.underlying
         current_sector_exposure = portfolio.sector_exposures.get(underlying_symbol, 0.0)
+
+        # Extract sentiment data if provided
+        news_sentiment_score = None
+        wsb_sentiment_score = None
+        combined_sentiment_score = None
+        wsb_is_trending = False
+        news_is_buzzing = False
+        sources_aligned = False
+        wsb_mentions = 0
+        sentiment_age_hours = 0.0
+
+        if sentiment:
+            news_sentiment_score = sentiment.news_score
+            wsb_sentiment_score = sentiment.wsb_score
+            combined_sentiment_score = sentiment.combined_score
+            wsb_is_trending = sentiment.wsb_is_trending
+            news_is_buzzing = sentiment.news_is_buzzing
+            sources_aligned = sentiment.sources_aligned
+
+            # Get WSB mention count
+            if sentiment.wsb_sentiment:
+                wsb_mentions = sentiment.wsb_sentiment.mentions_24h
+
+            # Calculate sentiment age in hours from timestamp
+            try:
+                from datetime import datetime
+                sent_time = datetime.fromisoformat(sentiment.timestamp.replace("Z", "+00:00"))
+                sentiment_age_hours = (now - sent_time).total_seconds() / 3600
+            except (ValueError, AttributeError):
+                sentiment_age_hours = 0.0
 
         return GateContext(
             action=action,
@@ -340,8 +374,15 @@ class GatingPipeline:
             new_position_percent=new_position_percent,
             # Symbol identification for per-symbol filtering
             underlying_symbol=underlying_symbol,
-            # Note: Sentiment data (news_sentiment_score, wsb_sentiment_score, wsb_mentions, etc.)
-            # must be set by the caller via the evaluate_with_sentiment() method
+            # Sentiment data from news + WSB
+            news_sentiment_score=news_sentiment_score,
+            wsb_sentiment_score=wsb_sentiment_score,
+            combined_sentiment_score=combined_sentiment_score,
+            wsb_is_trending=wsb_is_trending,
+            news_is_buzzing=news_is_buzzing,
+            sources_aligned=sources_aligned,
+            wsb_mentions=wsb_mentions,
+            sentiment_age_hours=sentiment_age_hours,
         )
 
     def _run_stage(
@@ -552,6 +593,7 @@ def evaluate_option_for_signal(
     action: Literal["BUY_CALL", "BUY_PUT", "SELL_CALL", "SELL_PUT"],
     contracts: int = 1,
     portfolio: PortfolioState | None = None,
+    sentiment: CombinedSentiment | None = None,
 ) -> PipelineResult:
     """Convenience function to evaluate an option through the pipeline.
 
@@ -561,9 +603,10 @@ def evaluate_option_for_signal(
         action: Trade action
         contracts: Number of contracts
         portfolio: Portfolio state
+        sentiment: Combined sentiment data from news + WSB
 
     Returns:
         PipelineResult
     """
     pipeline = GatingPipeline()
-    return pipeline.evaluate(option, underlying, action, contracts, portfolio)
+    return pipeline.evaluate(option, underlying, action, contracts, portfolio, sentiment)
