@@ -337,7 +337,6 @@ class GatingPipeline:
 
             # Calculate sentiment age in hours from timestamp
             try:
-                from datetime import datetime
                 sent_time = datetime.fromisoformat(sentiment.timestamp.replace("Z", "+00:00"))
                 sentiment_age_hours = (now - sent_time).total_seconds() / 3600
             except (ValueError, AttributeError):
