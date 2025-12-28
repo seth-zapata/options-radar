@@ -570,14 +570,18 @@ class SectorConcentrationGate(Gate):
 # =============================================================================
 
 class SentimentAlignmentGate(Gate):
-    """HARD gate: Requires news AND WSB sentiment to agree on direction.
+    """SOFT gate: Checks if news AND WSB sentiment agree on direction.
 
-    This is the key signal quality filter. When both professional news
-    sentiment and retail WSB sentiment point the same direction, we have
-    higher conviction that the signal is real, not noise.
+    When both professional news sentiment and retail WSB sentiment point
+    the same direction, we have higher conviction. Misalignment applies
+    a -15 confidence penalty but doesn't block the signal.
 
-    For bullish trades: Both news and WSB must be >= 0 (not bearish)
-    For bearish trades: Both news and WSB must be <= 0 (not bullish)
+    Changed from HARD to SOFT because we lack historical news data to
+    validate that alignment improves accuracy. Track aligned vs non-aligned
+    signals to validate this hypothesis with live data.
+
+    For bullish trades: Both news and WSB should be >= -10 (not bearish)
+    For bearish trades: Both news and WSB should be <= 10 (not bullish)
     """
 
     @property
@@ -586,17 +590,17 @@ class SentimentAlignmentGate(Gate):
 
     @property
     def severity(self) -> GateSeverity:
-        return GateSeverity.HARD
+        return GateSeverity.SOFT
 
     def evaluate(self, ctx: GateContext) -> GateResult:
-        # Need both sources for alignment check
+        # If missing sentiment, pass with note (don't block on missing data)
         if ctx.news_sentiment_score is None or ctx.wsb_sentiment_score is None:
             return GateResult(
                 gate_name=self.name,
-                passed=False,
-                value=None,
-                threshold="both sources required",
-                message="Missing sentiment source - need both news and WSB",
+                passed=True,  # Pass when data unavailable
+                value={"news": ctx.news_sentiment_score, "wsb": ctx.wsb_sentiment_score, "aligned": None},
+                threshold="both sources preferred",
+                message="[NO_NEWS] Missing news sentiment - WSB only",
                 severity=self.severity,
             )
 
@@ -607,36 +611,36 @@ class SentimentAlignmentGate(Gate):
             # For bullish trades: news and WSB should not be bearish
             news_ok = ctx.news_sentiment_score >= -10  # Allow slight negative
             wsb_ok = ctx.wsb_sentiment_score >= -10
-            passed = news_ok and wsb_ok
+            aligned = news_ok and wsb_ok
             threshold = "news >= -10 AND wsb >= -10"
-            if not passed:
+            if not aligned:
                 if not news_ok and not wsb_ok:
-                    message = f"Both news ({ctx.news_sentiment_score:.0f}) and WSB ({ctx.wsb_sentiment_score:.0f}) bearish"
+                    message = f"[NOT_ALIGNED] Both news ({ctx.news_sentiment_score:.0f}) and WSB ({ctx.wsb_sentiment_score:.0f}) bearish"
                 elif not news_ok:
-                    message = f"News sentiment ({ctx.news_sentiment_score:.0f}) conflicts with bullish trade"
+                    message = f"[NOT_ALIGNED] News ({ctx.news_sentiment_score:.0f}) conflicts with bullish trade"
                 else:
-                    message = f"WSB sentiment ({ctx.wsb_sentiment_score:.0f}) conflicts with bullish trade"
+                    message = f"[NOT_ALIGNED] WSB ({ctx.wsb_sentiment_score:.0f}) conflicts with bullish trade"
         else:
             # For bearish trades: news and WSB should not be bullish
             news_ok = ctx.news_sentiment_score <= 10  # Allow slight positive
             wsb_ok = ctx.wsb_sentiment_score <= 10
-            passed = news_ok and wsb_ok
+            aligned = news_ok and wsb_ok
             threshold = "news <= 10 AND wsb <= 10"
-            if not passed:
+            if not aligned:
                 if not news_ok and not wsb_ok:
-                    message = f"Both news ({ctx.news_sentiment_score:.0f}) and WSB ({ctx.wsb_sentiment_score:.0f}) bullish"
+                    message = f"[NOT_ALIGNED] Both news ({ctx.news_sentiment_score:.0f}) and WSB ({ctx.wsb_sentiment_score:.0f}) bullish"
                 elif not news_ok:
-                    message = f"News sentiment ({ctx.news_sentiment_score:.0f}) conflicts with bearish trade"
+                    message = f"[NOT_ALIGNED] News ({ctx.news_sentiment_score:.0f}) conflicts with bearish trade"
                 else:
-                    message = f"WSB sentiment ({ctx.wsb_sentiment_score:.0f}) conflicts with bearish trade"
+                    message = f"[NOT_ALIGNED] WSB ({ctx.wsb_sentiment_score:.0f}) conflicts with bearish trade"
 
-        if passed:
-            message = f"Aligned: news={ctx.news_sentiment_score:.0f}, WSB={ctx.wsb_sentiment_score:.0f}"
+        if aligned:
+            message = f"[ALIGNED] news={ctx.news_sentiment_score:.0f}, WSB={ctx.wsb_sentiment_score:.0f}"
 
         return GateResult(
             gate_name=self.name,
-            passed=passed,
-            value={"news": ctx.news_sentiment_score, "wsb": ctx.wsb_sentiment_score},
+            passed=aligned,  # False = applies confidence penalty
+            value={"news": ctx.news_sentiment_score, "wsb": ctx.wsb_sentiment_score, "aligned": aligned},
             threshold=threshold,
             message=message,
             severity=self.severity,

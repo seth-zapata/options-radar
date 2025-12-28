@@ -509,6 +509,7 @@ class GatingPipeline:
             "volume_sufficient": 15,
             "iv_rank_appropriate": 20,
             "sector_concentration": 10,
+            "sentiment_alignment": 15,  # News conflicts with WSB sentiment
         }
 
         for failure in soft_failures:
