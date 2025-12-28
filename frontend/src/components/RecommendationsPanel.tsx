@@ -399,16 +399,20 @@ function SessionStatusBar() {
 }
 
 export function RecommendationsPanel() {
-  const recommendations = useOptionsStore((state) => state.recommendations);
+  const allRecommendations = useOptionsStore((state) => state.recommendations);
+  const watchlist = useOptionsStore((state) => state.watchlist);
   const abstain = useOptionsStore((state) => state.abstain);
   const positions = useOptionsStore((state) => state.positions);
   const dismissRecommendation = useOptionsStore((state) => state.dismissRecommendation);
   const clearExpiredRecommendations = useOptionsStore((state) => state.clearExpiredRecommendations);
 
+  // Filter recommendations to only show symbols in watchlist
+  const recommendations = allRecommendations.filter(r => watchlist.includes(r.underlying));
+
   // Get set of confirmed recommendation IDs
   const confirmedRecIds = new Set(positions.map((p) => p.recommendationId));
 
-  // Count expired recommendations
+  // Count expired recommendations (only from filtered list)
   const expiredCount = recommendations.filter(r => isExpired(r.validUntil)).length;
 
   return (

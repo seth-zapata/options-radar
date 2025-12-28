@@ -3,7 +3,7 @@
  */
 
 import { useEffect, useState, useCallback } from 'react';
-import { useOptionsStore, CORE_SYMBOLS } from '../store/optionsStore';
+import { useOptionsStore } from '../store/optionsStore';
 import { SymbolSearch } from './SymbolSearch';
 
 interface MarketInfo {
@@ -227,7 +227,7 @@ export function StatusBar() {
       <div className="bg-slate-700 px-4 py-1 flex items-center gap-1 overflow-x-auto overflow-y-visible" style={{ position: 'relative' }}>
         {watchlist.map((symbol) => {
           const isActive = symbol === activeSymbol;
-          const isCore = CORE_SYMBOLS.includes(symbol);
+          const isLastSymbol = watchlist.length <= 1;
 
           return (
             <div key={symbol} className="flex items-center">
@@ -237,11 +237,11 @@ export function StatusBar() {
                   isActive
                     ? 'bg-indigo-600 text-white'
                     : 'bg-slate-600 text-slate-200 hover:bg-slate-500'
-                } ${isCore ? 'rounded-r' : ''}`}
+                } ${isLastSymbol ? 'rounded-r' : ''}`}
               >
                 {symbol}
               </button>
-              {!isCore && (
+              {!isLastSymbol && (
                 <button
                   onClick={(e) => {
                     e.stopPropagation();

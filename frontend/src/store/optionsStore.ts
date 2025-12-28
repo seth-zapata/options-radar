@@ -13,8 +13,8 @@ export interface EvaluatedOption {
   premium: number | null;
 }
 
-// Core ETFs that are always in the watchlist
-export const CORE_SYMBOLS = ['QQQ', 'SPY'];
+// Default symbols for new users (can be removed by user)
+export const DEFAULT_SYMBOLS = ['QQQ', 'NVDA', 'TSLA'];
 
 // Load watchlist from localStorage or use defaults
 const getInitialWatchlist = (): string[] => {
@@ -22,14 +22,15 @@ const getInitialWatchlist = (): string[] => {
     const saved = localStorage.getItem('options-radar-watchlist');
     if (saved) {
       const parsed = JSON.parse(saved);
-      // Ensure core symbols are always included
-      const withCore = new Set([...CORE_SYMBOLS, ...parsed]);
-      return Array.from(withCore);
+      // Return saved watchlist as-is (no forced symbols)
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
     }
   } catch (e) {
     console.error('Failed to load watchlist from localStorage:', e);
   }
-  return [...CORE_SYMBOLS];
+  return [...DEFAULT_SYMBOLS];
 };
 
 // Save watchlist to localStorage
@@ -134,7 +135,8 @@ export const useOptionsStore = create<OptionsState>((set) => ({
   watchlist: initialWatchlist,
   symbolNames: {
     QQQ: 'Invesco QQQ Trust',
-    SPY: 'SPDR S&P 500 ETF Trust',
+    NVDA: 'NVIDIA Corporation',
+    TSLA: 'Tesla, Inc.',
   },
   options: new Map(),
   underlying: null,
@@ -234,8 +236,8 @@ export const useOptionsStore = create<OptionsState>((set) => ({
 
   removeFromWatchlist: (symbol) => set((state) => {
     const upperSymbol = symbol.toUpperCase();
-    // Don't allow removing core symbols
-    if (CORE_SYMBOLS.includes(upperSymbol)) return state;
+    // Don't allow removing the last symbol
+    if (state.watchlist.length <= 1) return state;
     const newWatchlist = state.watchlist.filter(s => s !== upperSymbol);
     saveWatchlist(newWatchlist);
     // If we're removing the active symbol, switch to first in list
