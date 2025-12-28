@@ -25,6 +25,8 @@ from backend.engine.gates import (
     DATA_FRESHNESS_GATES,
     LIQUIDITY_GATES,
     PORTFOLIO_CONSTRAINT_GATES,
+    SENTIMENT_GATES,
+    SIGNAL_QUALITY_GATES,
     STRATEGY_FIT_GATES,
     Gate,
     GateContext,
@@ -43,6 +45,8 @@ class PipelineStage(str, Enum):
     LIQUIDITY = "liquidity"
     STRATEGY_FIT = "strategy_fit"
     PORTFOLIO_CONSTRAINTS = "portfolio_constraints"
+    SIGNAL_QUALITY = "signal_quality"  # News + WSB alignment, mentions, symbol filter
+    SENTIMENT = "sentiment"  # Soft sentiment gates for confidence
     EXPLAIN = "explain"
 
 
@@ -60,6 +64,9 @@ class AbstainReason(str, Enum):
     PORTFOLIO_CONSTRAINT = "PORTFOLIO_CONSTRAINT"
     KILL_SWITCH_ACTIVE = "KILL_SWITCH_ACTIVE"
     NO_DATA = "NO_DATA"
+    SENTIMENT_MISALIGNED = "SENTIMENT_MISALIGNED"  # News and WSB don't agree
+    INSUFFICIENT_MENTIONS = "INSUFFICIENT_MENTIONS"  # Not enough WSB attention
+    SYMBOL_DISABLED = "SYMBOL_DISABLED"  # Signals disabled for this symbol
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +174,8 @@ class GatingPipeline:
     liquidity_gates: list[Gate] = field(default_factory=lambda: list(LIQUIDITY_GATES))
     strategy_fit_gates: list[Gate] = field(default_factory=lambda: list(STRATEGY_FIT_GATES))
     portfolio_constraint_gates: list[Gate] = field(default_factory=lambda: list(PORTFOLIO_CONSTRAINT_GATES))
+    signal_quality_gates: list[Gate] = field(default_factory=lambda: list(SIGNAL_QUALITY_GATES))
+    sentiment_gates: list[Gate] = field(default_factory=lambda: list(SENTIMENT_GATES))
 
     def evaluate(
         self,
@@ -242,7 +251,29 @@ class GatingPipeline:
         if stage_result is not None:
             return stage_result
 
-        # Stage 5: Explain (all gates passed)
+        # Stage 5: Signal Quality (sentiment alignment, mentions, symbol filter)
+        stage_result = self._run_stage(
+            PipelineStage.SIGNAL_QUALITY,
+            self.signal_quality_gates,
+            ctx,
+            all_results,
+            soft_failures,
+        )
+        if stage_result is not None:
+            return stage_result
+
+        # Stage 6: Sentiment (soft gates for confidence adjustment)
+        stage_result = self._run_stage(
+            PipelineStage.SENTIMENT,
+            self.sentiment_gates,
+            ctx,
+            all_results,
+            soft_failures,
+        )
+        if stage_result is not None:
+            return stage_result
+
+        # Stage 7: Explain (all gates passed)
         confidence_cap = self._calculate_confidence_cap(soft_failures)
 
         return PipelineResult(
@@ -307,6 +338,10 @@ class GatingPipeline:
             # Sector
             current_sector_exposure_percent=current_sector_exposure,
             new_position_percent=new_position_percent,
+            # Symbol identification for per-symbol filtering
+            underlying_symbol=underlying_symbol,
+            # Note: Sentiment data (news_sentiment_score, wsb_sentiment_score, wsb_mentions, etc.)
+            # must be set by the caller via the evaluate_with_sentiment() method
         )
 
     def _run_stage(
@@ -419,6 +454,10 @@ class GatingPipeline:
             "cash_available": AbstainReason.PORTFOLIO_CONSTRAINT,
             "position_size_limit": AbstainReason.PORTFOLIO_CONSTRAINT,
             "sector_concentration": AbstainReason.PORTFOLIO_CONSTRAINT,
+            # Signal quality gates
+            "signal_enabled": AbstainReason.SYMBOL_DISABLED,
+            "sentiment_alignment": AbstainReason.SENTIMENT_MISALIGNED,
+            "minimum_mentions": AbstainReason.INSUFFICIENT_MENTIONS,
         }
 
         return gate_to_reason.get(failed_gate.gate_name, AbstainReason.GATES_FAILED)
@@ -441,6 +480,11 @@ class GatingPipeline:
             "cash_available": "Increase cash or reduce position size",
             "position_size_limit": "Reduce position size to < 5% of portfolio",
             "sector_concentration": "Reduce sector exposure to < 25%",
+            # Signal quality gates
+            "signal_enabled": "Signals disabled for this symbol (low backtest accuracy)",
+            "sentiment_alignment": "News and WSB sentiment must agree on direction",
+            "minimum_mentions": f"WSB mentions must reach 5 (currently {failed_gate.value})"
+            if failed_gate.value is not None else "Need more WSB attention (5+ mentions)",
         }
 
         return gate_to_condition.get(

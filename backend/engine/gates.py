@@ -135,6 +135,10 @@ class GateContext:
     wsb_is_trending: bool = False
     news_is_buzzing: bool = False
     sources_aligned: bool = False  # True if news and WSB agree on direction
+    wsb_mentions: int = 0  # WSB mention count for signal strength
+
+    # Symbol identification (for per-symbol filtering)
+    underlying_symbol: str = ""
 
 
 class Gate(ABC):
@@ -373,9 +377,16 @@ class VolumeSufficientGate(Gate):
 class IVRankAppropriateGate(Gate):
     """Ensures IV rank is appropriate for the action. SOFT gate.
 
-    For buying premium: IV rank should be < 50 (buy cheap)
+    For buying premium: IV rank should be < 40 (buy cheap)
     For selling premium: IV rank should be > 30 (collect premium)
+
+    Note: IV rank > 70 results in an "elevated IV risk" soft failure.
     """
+
+    # Thresholds - tightened based on TastyTrade research
+    BUY_MAX_IV_RANK = 40.0  # Only buy when IV is relatively cheap
+    SELL_MIN_IV_RANK = 30.0  # Selling premium needs some IV
+    ELEVATED_IV_THRESHOLD = 70.0  # High IV = elevated risk
 
     @property
     def name(self) -> str:
@@ -389,18 +400,31 @@ class IVRankAppropriateGate(Gate):
         buying_premium = ctx.action in ("BUY_CALL", "BUY_PUT")
 
         if buying_premium:
-            passed = ctx.iv_rank < 50
-            threshold = "< 50"
+            # For buys: want low IV (< 40) to avoid paying inflated premium
+            if ctx.iv_rank >= self.ELEVATED_IV_THRESHOLD:
+                return GateResult(
+                    gate_name=self.name,
+                    passed=False,
+                    value=ctx.iv_rank,
+                    threshold=f"< {self.BUY_MAX_IV_RANK}",
+                    message=f"IV rank {ctx.iv_rank:.1f} elevated - premium expensive",
+                    severity=self.severity,
+                )
+            passed = ctx.iv_rank < self.BUY_MAX_IV_RANK
+            threshold = f"< {self.BUY_MAX_IV_RANK}"
+            message = "OK" if passed else f"IV rank {ctx.iv_rank:.1f} above ideal for buying"
         else:
-            passed = ctx.iv_rank > 30
-            threshold = "> 30"
+            # For sells: want decent IV (> 30) to collect premium
+            passed = ctx.iv_rank > self.SELL_MIN_IV_RANK
+            threshold = f"> {self.SELL_MIN_IV_RANK}"
+            message = "OK" if passed else f"IV rank {ctx.iv_rank:.1f} too low for selling premium"
 
         return GateResult(
             gate_name=self.name,
             passed=passed,
             value=ctx.iv_rank,
             threshold=threshold,
-            message="OK" if passed else f"IV rank {ctx.iv_rank:.1f} not ideal for {ctx.action}",
+            message=message,
             severity=self.severity,
         )
 
@@ -541,8 +565,162 @@ class SectorConcentrationGate(Gate):
 
 
 # =============================================================================
-# Stage 5: Sentiment Gates (all SOFT - sentiment enhances but doesn't block)
+# Stage 5: Sentiment & Signal Quality Gates
 # =============================================================================
+
+class SentimentAlignmentGate(Gate):
+    """HARD gate: Requires news AND WSB sentiment to agree on direction.
+
+    This is the key signal quality filter. When both professional news
+    sentiment and retail WSB sentiment point the same direction, we have
+    higher conviction that the signal is real, not noise.
+
+    For bullish trades: Both news and WSB must be >= 0 (not bearish)
+    For bearish trades: Both news and WSB must be <= 0 (not bullish)
+    """
+
+    @property
+    def name(self) -> str:
+        return "sentiment_alignment"
+
+    @property
+    def severity(self) -> GateSeverity:
+        return GateSeverity.HARD
+
+    def evaluate(self, ctx: GateContext) -> GateResult:
+        # Need both sources for alignment check
+        if ctx.news_sentiment_score is None or ctx.wsb_sentiment_score is None:
+            return GateResult(
+                gate_name=self.name,
+                passed=False,
+                value=None,
+                threshold="both sources required",
+                message="Missing sentiment source - need both news and WSB",
+                severity=self.severity,
+            )
+
+        is_bullish_trade = ctx.action in ("BUY_CALL", "SELL_PUT")
+
+        # Check if both sources agree with trade direction
+        if is_bullish_trade:
+            # For bullish trades: news and WSB should not be bearish
+            news_ok = ctx.news_sentiment_score >= -10  # Allow slight negative
+            wsb_ok = ctx.wsb_sentiment_score >= -10
+            passed = news_ok and wsb_ok
+            threshold = "news >= -10 AND wsb >= -10"
+            if not passed:
+                if not news_ok and not wsb_ok:
+                    message = f"Both news ({ctx.news_sentiment_score:.0f}) and WSB ({ctx.wsb_sentiment_score:.0f}) bearish"
+                elif not news_ok:
+                    message = f"News sentiment ({ctx.news_sentiment_score:.0f}) conflicts with bullish trade"
+                else:
+                    message = f"WSB sentiment ({ctx.wsb_sentiment_score:.0f}) conflicts with bullish trade"
+        else:
+            # For bearish trades: news and WSB should not be bullish
+            news_ok = ctx.news_sentiment_score <= 10  # Allow slight positive
+            wsb_ok = ctx.wsb_sentiment_score <= 10
+            passed = news_ok and wsb_ok
+            threshold = "news <= 10 AND wsb <= 10"
+            if not passed:
+                if not news_ok and not wsb_ok:
+                    message = f"Both news ({ctx.news_sentiment_score:.0f}) and WSB ({ctx.wsb_sentiment_score:.0f}) bullish"
+                elif not news_ok:
+                    message = f"News sentiment ({ctx.news_sentiment_score:.0f}) conflicts with bearish trade"
+                else:
+                    message = f"WSB sentiment ({ctx.wsb_sentiment_score:.0f}) conflicts with bearish trade"
+
+        if passed:
+            message = f"Aligned: news={ctx.news_sentiment_score:.0f}, WSB={ctx.wsb_sentiment_score:.0f}"
+
+        return GateResult(
+            gate_name=self.name,
+            passed=passed,
+            value={"news": ctx.news_sentiment_score, "wsb": ctx.wsb_sentiment_score},
+            threshold=threshold,
+            message=message,
+            severity=self.severity,
+        )
+
+
+class MinimumMentionsGate(Gate):
+    """HARD gate: Requires minimum WSB mentions for signal reliability.
+
+    A stock mentioned once on WSB is noise. Higher mention counts indicate
+    real retail attention and more reliable directional moves.
+    """
+
+    MIN_MENTIONS = 5  # Configurable via SignalQualityConfig
+
+    @property
+    def name(self) -> str:
+        return "minimum_mentions"
+
+    @property
+    def severity(self) -> GateSeverity:
+        return GateSeverity.HARD
+
+    def evaluate(self, ctx: GateContext) -> GateResult:
+        passed = ctx.wsb_mentions >= self.MIN_MENTIONS
+
+        if passed:
+            if ctx.wsb_mentions >= 20:
+                message = f"High WSB attention ({ctx.wsb_mentions} mentions)"
+            else:
+                message = f"WSB mentions OK ({ctx.wsb_mentions})"
+        else:
+            message = f"Insufficient WSB mentions ({ctx.wsb_mentions} < {self.MIN_MENTIONS})"
+
+        return GateResult(
+            gate_name=self.name,
+            passed=passed,
+            value=ctx.wsb_mentions,
+            threshold=f">= {self.MIN_MENTIONS}",
+            message=message,
+            severity=self.severity,
+        )
+
+
+class SignalEnabledGate(Gate):
+    """HARD gate: Checks if signals are enabled for this symbol.
+
+    Based on backtest results, some symbols (like AMD, AAPL) have ~50% accuracy,
+    which is no better than random. These symbols can still be monitored but
+    should not generate trade signals.
+    """
+
+    # Symbols with disabled signals (configurable via SignalQualityConfig)
+    DISABLED_SYMBOLS: tuple[str, ...] = ("AMD", "AAPL")
+
+    @property
+    def name(self) -> str:
+        return "signal_enabled"
+
+    @property
+    def severity(self) -> GateSeverity:
+        return GateSeverity.HARD
+
+    def evaluate(self, ctx: GateContext) -> GateResult:
+        if not ctx.underlying_symbol:
+            return GateResult(
+                gate_name=self.name,
+                passed=True,
+                value=None,
+                threshold="symbol required",
+                message="No symbol specified (skipped)",
+                severity=self.severity,
+            )
+
+        passed = ctx.underlying_symbol not in self.DISABLED_SYMBOLS
+
+        return GateResult(
+            gate_name=self.name,
+            passed=passed,
+            value=ctx.underlying_symbol,
+            threshold=f"not in {self.DISABLED_SYMBOLS}",
+            message="OK" if passed else f"Signals disabled for {ctx.underlying_symbol} (low backtest accuracy)",
+            severity=self.severity,
+        )
+
 
 class SentimentDirectionGate(Gate):
     """Checks if sentiment aligns with trade direction. SOFT gate.
@@ -637,46 +815,32 @@ class RetailMomentumGate(Gate):
         )
 
 
-class SentimentConvergenceGate(Gate):
-    """Bonus gate: News and WSB sentiment agree. SOFT gate.
+class HighMentionsBoostGate(Gate):
+    """SOFT gate: Provides confidence boost for high mention counts.
 
-    When both sources point the same direction (bullish or bearish),
-    this provides extra confidence in the trade direction.
+    When a symbol has 20+ WSB mentions, we consider this "high conviction"
+    and award a confidence boost (gate passes with bonus message).
     """
+
+    HIGH_THRESHOLD = 20
 
     @property
     def name(self) -> str:
-        return "sentiment_convergence"
+        return "high_mentions_boost"
 
     @property
     def severity(self) -> GateSeverity:
         return GateSeverity.SOFT
 
     def evaluate(self, ctx: GateContext) -> GateResult:
-        # Need both sources for convergence check
-        if ctx.news_sentiment_score is None or ctx.wsb_sentiment_score is None:
-            return GateResult(
-                gate_name=self.name,
-                passed=True,
-                value=None,
-                threshold="both sources needed",
-                message="Missing sentiment source (skipped)",
-                severity=self.severity,
-            )
-
-        # Check if sources are aligned (both bullish or both bearish)
-        # This is informational - always passes but message indicates alignment
-        if ctx.sources_aligned:
-            message = "News and WSB sentiment aligned"
-        else:
-            message = "News and WSB divergent (mixed signals)"
+        is_high = ctx.wsb_mentions >= self.HIGH_THRESHOLD
 
         return GateResult(
             gate_name=self.name,
-            passed=True,  # Informational, not a blocker
-            value=ctx.sources_aligned,
-            threshold="sources aligned",
-            message=message,
+            passed=True,  # Always passes - this is a boost gate
+            value=ctx.wsb_mentions,
+            threshold=f">= {self.HIGH_THRESHOLD} for boost",
+            message=f"High conviction ({ctx.wsb_mentions} mentions)" if is_high else "Normal mention volume",
             severity=self.severity,
         )
 
@@ -686,12 +850,6 @@ class SentimentConvergenceGate(Gate):
 # =============================================================================
 
 # All gates organized by pipeline stage
-SENTIMENT_GATES: list[Gate] = [
-    SentimentDirectionGate(),
-    RetailMomentumGate(),
-    SentimentConvergenceGate(),
-]
-
 DATA_FRESHNESS_GATES: list[Gate] = [
     UnderlyingPriceFreshGate(),
     QuoteFreshGate(),
@@ -715,12 +873,27 @@ PORTFOLIO_CONSTRAINT_GATES: list[Gate] = [
     SectorConcentrationGate(),
 ]
 
+# Signal quality gates - HARD gates that filter for high-quality signals
+SIGNAL_QUALITY_GATES: list[Gate] = [
+    SignalEnabledGate(),      # HARD: Check symbol is allowed to generate signals
+    SentimentAlignmentGate(), # HARD: Require news + WSB alignment
+    MinimumMentionsGate(),    # HARD: Require minimum WSB mentions
+]
+
+# Sentiment enhancement gates - SOFT gates for confidence adjustment
+SENTIMENT_GATES: list[Gate] = [
+    SentimentDirectionGate(),  # SOFT: Combined sentiment direction
+    RetailMomentumGate(),      # SOFT: WSB trending momentum
+    HighMentionsBoostGate(),   # SOFT: Confidence boost for high mentions
+]
+
 # All gates in pipeline order
 ALL_GATES: list[Gate] = (
     DATA_FRESHNESS_GATES +
     LIQUIDITY_GATES +
     STRATEGY_FIT_GATES +
     PORTFOLIO_CONSTRAINT_GATES +
+    SIGNAL_QUALITY_GATES +
     SENTIMENT_GATES
 )
 

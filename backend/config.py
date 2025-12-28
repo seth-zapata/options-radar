@@ -64,6 +64,36 @@ class QuiverConfig:
 
 
 @dataclass(frozen=True)
+class SignalQualityConfig:
+    """Signal quality filter configuration.
+
+    Based on backtest results showing which symbols/conditions have predictive power.
+    """
+    # Symbols where signals are disabled (poor backtest accuracy ~50%)
+    # These can still be monitored in scanner but won't generate recommendations
+    signals_disabled: tuple[str, ...] = ("AMD", "AAPL")
+
+    # IV Rank thresholds for buy signals
+    # Buy signals only fire when IV is relatively cheap
+    iv_rank_max_for_buys: float = 40.0  # Only buy when IV Rank < 40
+    iv_rank_elevated_threshold: float = 70.0  # Flag as "elevated IV risk" above 70
+
+    # WSB mention thresholds
+    # Higher mentions = more reliable signal (backtest hypothesis)
+    min_mentions_for_signal: int = 5  # Require at least 5 mentions
+    high_mention_threshold: int = 20  # 20+ mentions = "high conviction"
+
+    # Sentiment alignment requirement
+    # When True, signals only fire when news AND WSB sentiment agree
+    require_sentiment_alignment: bool = True
+
+    # Confidence boosts/penalties
+    alignment_confidence_boost: int = 10  # Bonus when news + WSB strongly aligned
+    high_mentions_confidence_boost: int = 5  # Bonus for high mention count
+    elevated_iv_confidence_penalty: int = 15  # Penalty for IV > 70
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Main application configuration."""
 
@@ -85,6 +115,9 @@ class AppConfig:
     ws_reconnect_base_delay: float = 1.0
     ws_reconnect_max_delay: float = 60.0
     ws_reconnect_max_attempts: int | None = None  # None = infinite
+
+    # Signal quality filters
+    signal_quality: SignalQualityConfig = SignalQualityConfig()
 
 
 def _get_env_or_raise(key: str) -> str:
