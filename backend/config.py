@@ -77,7 +77,7 @@ class SignalQualityConfig:
 
     # IV Rank thresholds for buy signals
     # Buy signals only fire when IV is relatively cheap
-    iv_rank_max_for_buys: float = 40.0  # Only buy when IV Rank < 40
+    iv_rank_max_for_buys: float = 45.0  # Only buy when IV Rank <= 45
     iv_rank_elevated_threshold: float = 70.0  # Flag as "elevated IV risk" above 70
 
     # WSB mention thresholds

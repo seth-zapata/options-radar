@@ -378,14 +378,14 @@ class VolumeSufficientGate(Gate):
 class IVRankAppropriateGate(Gate):
     """Ensures IV rank is appropriate for the action. SOFT gate.
 
-    For buying premium: IV rank should be < 40 (buy cheap)
+    For buying premium: IV rank should be <= 45 (buy cheap)
     For selling premium: IV rank should be > 30 (collect premium)
 
     Note: IV rank > 70 results in an "elevated IV risk" soft failure.
     """
 
     # Thresholds - tightened based on TastyTrade research
-    BUY_MAX_IV_RANK = 40.0  # Only buy when IV is relatively cheap
+    BUY_MAX_IV_RANK = 45.0  # Only buy when IV is relatively cheap (<=45)
     SELL_MIN_IV_RANK = 30.0  # Selling premium needs some IV
     ELEVATED_IV_THRESHOLD = 70.0  # High IV = elevated risk
 
@@ -401,18 +401,18 @@ class IVRankAppropriateGate(Gate):
         buying_premium = ctx.action in ("BUY_CALL", "BUY_PUT")
 
         if buying_premium:
-            # For buys: want low IV (< 40) to avoid paying inflated premium
+            # For buys: want low IV (<= 45) to avoid paying inflated premium
             if ctx.iv_rank >= self.ELEVATED_IV_THRESHOLD:
                 return GateResult(
                     gate_name=self.name,
                     passed=False,
                     value=ctx.iv_rank,
-                    threshold=f"< {self.BUY_MAX_IV_RANK}",
+                    threshold=f"<= {self.BUY_MAX_IV_RANK}",
                     message=f"IV rank {ctx.iv_rank:.1f} elevated - premium expensive",
                     severity=self.severity,
                 )
-            passed = ctx.iv_rank < self.BUY_MAX_IV_RANK
-            threshold = f"< {self.BUY_MAX_IV_RANK}"
+            passed = ctx.iv_rank <= self.BUY_MAX_IV_RANK
+            threshold = f"<= {self.BUY_MAX_IV_RANK}"
             message = "OK" if passed else f"IV rank {ctx.iv_rank:.1f} above ideal for buying"
         else:
             # For sells: want decent IV (> 30) to collect premium
