@@ -225,8 +225,15 @@ def position_to_dict(pos: TrackedPosition) -> dict[str, Any]:
 
 
 async def on_option_update(option: AggregatedOptionData) -> None:
-    """Callback when option data updates - broadcast to clients."""
+    """Callback when option data updates - broadcast to clients.
+
+    Only broadcasts if the option is for the currently focused symbol.
+    """
     try:
+        # Only broadcast options for the current symbol to avoid UI flicker
+        if option.canonical_id.underlying != current_symbol:
+            return
+
         if connection_manager.connection_count > 0:
             await connection_manager.broadcast_option_update(option_to_dict(option))
     except Exception as e:
@@ -234,7 +241,14 @@ async def on_option_update(option: AggregatedOptionData) -> None:
 
 
 async def on_underlying_update(underlying: UnderlyingData) -> None:
-    """Callback when underlying data updates - broadcast to clients."""
+    """Callback when underlying data updates - broadcast to clients.
+
+    Only broadcasts if the underlying is for the currently focused symbol.
+    """
+    # Only broadcast for the current symbol to avoid UI flicker
+    if underlying.symbol != current_symbol:
+        return
+
     await connection_manager.broadcast_underlying_update(underlying_to_dict(underlying))
 
 
