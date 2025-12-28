@@ -3,7 +3,7 @@
  */
 
 import { useEffect, useRef } from 'react';
-import { useOptionsStore } from '../store/optionsStore';
+import { useOptionsStore, EvaluatedOption } from '../store/optionsStore';
 import type { OptionData, UnderlyingData, WebSocketMessage, GateResult, AbstainData } from '../types';
 
 const WS_URL = import.meta.env.PROD
@@ -143,9 +143,11 @@ export function useOptionsStream() {
                 updateUnderlying(message.data as UnderlyingData);
                 break;
 
-              case 'gate_status':
-                setGateResults((message.data as { gates: GateResult[] }).gates);
+              case 'gate_status': {
+                const gateData = message.data as { gates: GateResult[]; evaluatedOption?: EvaluatedOption };
+                setGateResults(gateData.gates, gateData.evaluatedOption);
                 break;
+              }
 
               case 'abstain':
                 setAbstain(message.data as AbstainData);

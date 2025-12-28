@@ -6,6 +6,13 @@ import { create } from 'zustand';
 import type { OptionData, UnderlyingData, AbstainData, ConnectionStatus, GateResult } from '../types';
 import { optionKey } from '../types';
 
+export interface EvaluatedOption {
+  strike: number;
+  right: string;
+  expiry: string;
+  premium: number | null;
+}
+
 interface OptionsState {
   // Connection
   connectionStatus: ConnectionStatus;
@@ -18,13 +25,14 @@ interface OptionsState {
   // Gating
   abstain: AbstainData | null;
   gateResults: GateResult[];
+  evaluatedOption: EvaluatedOption | null;
 
   // Actions
   setConnectionStatus: (status: ConnectionStatus) => void;
   updateOption: (option: OptionData) => void;
   updateUnderlying: (underlying: UnderlyingData) => void;
   setAbstain: (abstain: AbstainData | null) => void;
-  setGateResults: (results: GateResult[]) => void;
+  setGateResults: (results: GateResult[], evaluatedOption?: EvaluatedOption) => void;
   clearAll: () => void;
 }
 
@@ -36,6 +44,7 @@ export const useOptionsStore = create<OptionsState>((set) => ({
   underlying: null,
   abstain: null,
   gateResults: [],
+  evaluatedOption: null,
 
   // Actions
   setConnectionStatus: (status) => set({ connectionStatus: status }),
@@ -56,13 +65,17 @@ export const useOptionsStore = create<OptionsState>((set) => ({
 
   setAbstain: (abstain) => set({ abstain }),
 
-  setGateResults: (results) => set({ gateResults: results }),
+  setGateResults: (results, evaluatedOption) => set({
+    gateResults: results,
+    evaluatedOption: evaluatedOption ?? null,
+  }),
 
   clearAll: () => set({
     options: new Map(),
     underlying: null,
     abstain: null,
     gateResults: [],
+    evaluatedOption: null,
   }),
 }));
 

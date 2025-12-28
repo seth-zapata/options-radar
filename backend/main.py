@@ -170,8 +170,20 @@ async def gate_evaluation_loop() -> None:
                 for g in result.all_results
             ]
 
-            # Broadcast gate status
-            await connection_manager.broadcast_gate_status(gate_results)
+            # Broadcast gate status with the option being evaluated
+            await connection_manager.broadcast({
+                "type": "gate_status",
+                "data": {
+                    "gates": gate_results,
+                    "evaluatedOption": {
+                        "strike": atm_option.canonical_id.strike,
+                        "right": atm_option.canonical_id.right,
+                        "expiry": atm_option.canonical_id.expiry,
+                        "premium": atm_option.mid,
+                    },
+                },
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
 
             # Broadcast abstain status (null clears previous abstain)
             if result.abstain:

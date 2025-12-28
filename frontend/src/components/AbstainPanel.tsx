@@ -26,7 +26,7 @@ function GateResultRow({ gate }: { gate: GateResult }) {
 }
 
 export function AbstainPanel() {
-  const { abstain, gateResults } = useOptionsStore();
+  const { abstain, gateResults, evaluatedOption } = useOptionsStore();
 
   const failedGates = gateResults.filter((g) => !g.passed);
   const passedGates = gateResults.filter((g) => g.passed);
@@ -42,9 +42,21 @@ export function AbstainPanel() {
     <div className="bg-white rounded-lg shadow overflow-hidden">
       <div className={`px-4 py-3 ${hasHardFailure || abstain ? 'bg-amber-100' : 'bg-green-100'}`}>
         <div className="flex items-center justify-between">
-          <h2 className="font-bold text-lg">
-            {hasHardFailure || abstain ? 'ABSTAINING' : 'MONITORING'}
-          </h2>
+          <div>
+            <h2 className="font-bold text-lg">
+              {hasHardFailure || abstain ? 'ABSTAINING' : 'MONITORING'}
+            </h2>
+            {evaluatedOption && (
+              <p className="text-sm text-slate-600">
+                Evaluating: <span className="font-mono font-medium">
+                  {evaluatedOption.expiry} ${evaluatedOption.strike} {evaluatedOption.right === 'C' ? 'Call' : 'Put'}
+                </span>
+                {evaluatedOption.premium && (
+                  <span className="ml-2 text-slate-500">@ ${evaluatedOption.premium.toFixed(2)}</span>
+                )}
+              </p>
+            )}
+          </div>
           {abstain && (
             <span className="px-3 py-1 bg-amber-200 rounded-full text-sm font-medium">
               {abstain.reason.replace(/_/g, ' ')}
