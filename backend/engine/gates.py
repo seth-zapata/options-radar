@@ -473,9 +473,13 @@ class CashAvailableGate(Gate):
 
 
 class PositionSizeLimitGate(Gate):
-    """Ensures position size doesn't exceed portfolio limits (5%)."""
+    """Ensures position size doesn't exceed portfolio limits (20%).
 
-    MAX_PERCENT = 5.0
+    With a $5,000 portfolio, 20% = $1,000 max per position,
+    which aligns with the single position limit in session tracker.
+    """
+
+    MAX_PERCENT = 20.0
 
     @property
     def name(self) -> str:

@@ -18,7 +18,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -853,8 +853,76 @@ async def health_check() -> dict[str, Any]:
 
 @app.get("/api/market")
 async def get_market_status() -> dict[str, Any]:
-    """Get current market status from Alpaca."""
-    from backend.data.market_hours import check_market_hours, CT
+    """Get current market status from Alpaca (or simulated in mock mode)."""
+    from backend.data.market_hours import CT
+
+    # In mock mode, simulate market as open
+    if mock_generator:
+        now = datetime.now(CT)
+        # Simulate market open 9:30 AM - 4:00 PM CT on weekdays
+        weekday = now.weekday()
+        hour = now.hour
+        minute = now.minute
+
+        is_weekday = weekday < 5
+        is_market_hours = (hour > 9 or (hour == 9 and minute >= 30)) and hour < 16
+        is_open = is_weekday and is_market_hours
+
+        # Calculate next open/close
+        if is_open:
+            # Market closes at 4 PM today
+            close_time = now.replace(hour=16, minute=0, second=0, microsecond=0)
+            seconds_until_close = int((close_time - now).total_seconds())
+            return {
+                "isOpen": True,
+                "currentTime": now.strftime("%I:%M:%S %p %Z"),
+                "nextOpen": "Tomorrow 9:30 AM CT" if weekday < 4 else "Monday 9:30 AM CT",
+                "nextClose": "4:00 PM CT",
+                "timeUntilOpen": None,
+                "timeUntilClose": f"{seconds_until_close // 3600}h {(seconds_until_close % 3600) // 60}m",
+                "secondsUntilOpen": None,
+                "secondsUntilClose": seconds_until_close,
+                "timezone": "Central Time",
+                "mock": True,
+            }
+        else:
+            # Market is closed - calculate next open
+            if weekday >= 5:
+                # Weekend - next open is Monday
+                days_until_monday = (7 - weekday) % 7 or 7
+                next_open = (now + timedelta(days=days_until_monday)).replace(
+                    hour=9, minute=30, second=0, microsecond=0
+                )
+            elif hour >= 16:
+                # After hours - next open is tomorrow (or Monday)
+                if weekday == 4:
+                    next_open = (now + timedelta(days=3)).replace(
+                        hour=9, minute=30, second=0, microsecond=0
+                    )
+                else:
+                    next_open = (now + timedelta(days=1)).replace(
+                        hour=9, minute=30, second=0, microsecond=0
+                    )
+            else:
+                # Before market open today
+                next_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+
+            seconds_until_open = int((next_open - now).total_seconds())
+            return {
+                "isOpen": False,
+                "currentTime": now.strftime("%I:%M:%S %p %Z"),
+                "nextOpen": next_open.strftime("%a %I:%M %p CT"),
+                "nextClose": "4:00 PM CT",
+                "timeUntilOpen": f"{seconds_until_open // 3600}h {(seconds_until_open % 3600) // 60}m",
+                "timeUntilClose": None,
+                "secondsUntilOpen": seconds_until_open,
+                "secondsUntilClose": None,
+                "timezone": "Central Time",
+                "mock": True,
+            }
+
+    # Real mode - use Alpaca API
+    from backend.data.market_hours import check_market_hours
 
     try:
         config = load_config()
@@ -1336,52 +1404,106 @@ async def search_symbols(q: str, limit: int = 20) -> dict[str, Any]:
         # In mock mode, return some common symbols
         if MOCK_MODE:
             mock_symbols = [
+                # Popular tech stocks
                 {"symbol": "AAPL", "name": "Apple Inc."},
                 {"symbol": "AMD", "name": "Advanced Micro Devices Inc."},
                 {"symbol": "AMZN", "name": "Amazon.com Inc."},
-                {"symbol": "ARKK", "name": "ARK Innovation ETF"},
-                {"symbol": "BA", "name": "Boeing Company"},
-                {"symbol": "BABA", "name": "Alibaba Group Holding Ltd."},
-                {"symbol": "BAC", "name": "Bank of America Corporation"},
-                {"symbol": "C", "name": "Citigroup Inc."},
+                {"symbol": "ARM", "name": "Arm Holdings plc"},
+                {"symbol": "AVGO", "name": "Broadcom Inc."},
+                {"symbol": "CRWD", "name": "CrowdStrike Holdings Inc."},
+                {"symbol": "CRWV", "name": "CoreWeave Inc."},
                 {"symbol": "CRM", "name": "Salesforce Inc."},
-                {"symbol": "DIS", "name": "Walt Disney Company"},
-                {"symbol": "F", "name": "Ford Motor Company"},
-                {"symbol": "GM", "name": "General Motors Company"},
+                {"symbol": "CSCO", "name": "Cisco Systems Inc."},
                 {"symbol": "GOOG", "name": "Alphabet Inc."},
                 {"symbol": "GOOGL", "name": "Alphabet Inc. Class A"},
-                {"symbol": "HD", "name": "Home Depot Inc."},
+                {"symbol": "IBM", "name": "International Business Machines"},
                 {"symbol": "INTC", "name": "Intel Corporation"},
-                {"symbol": "IWM", "name": "iShares Russell 2000 ETF"},
-                {"symbol": "JNJ", "name": "Johnson & Johnson"},
-                {"symbol": "JPM", "name": "JPMorgan Chase & Co."},
-                {"symbol": "KO", "name": "Coca-Cola Company"},
                 {"symbol": "META", "name": "Meta Platforms Inc."},
-                {"symbol": "MCD", "name": "McDonald's Corporation"},
                 {"symbol": "MSFT", "name": "Microsoft Corporation"},
                 {"symbol": "MU", "name": "Micron Technology Inc."},
                 {"symbol": "NFLX", "name": "Netflix Inc."},
-                {"symbol": "NKE", "name": "Nike Inc."},
                 {"symbol": "NVDA", "name": "NVIDIA Corporation"},
                 {"symbol": "ORCL", "name": "Oracle Corporation"},
-                {"symbol": "PEP", "name": "PepsiCo Inc."},
-                {"symbol": "PFE", "name": "Pfizer Inc."},
                 {"symbol": "PLTR", "name": "Palantir Technologies Inc."},
-                {"symbol": "PYPL", "name": "PayPal Holdings Inc."},
-                {"symbol": "QQQ", "name": "Invesco QQQ Trust"},
-                {"symbol": "ROKU", "name": "Roku Inc."},
+                {"symbol": "QCOM", "name": "Qualcomm Inc."},
+                {"symbol": "SNOW", "name": "Snowflake Inc."},
+                {"symbol": "TSM", "name": "Taiwan Semiconductor"},
+                # AI/Tech growth
+                {"symbol": "AI", "name": "C3.ai Inc."},
+                {"symbol": "IONQ", "name": "IonQ Inc."},
+                {"symbol": "PATH", "name": "UiPath Inc."},
+                {"symbol": "RKLB", "name": "Rocket Lab USA Inc."},
+                {"symbol": "SMCI", "name": "Super Micro Computer Inc."},
+                {"symbol": "U", "name": "Unity Software Inc."},
+                # Consumer / E-commerce
+                {"symbol": "BABA", "name": "Alibaba Group Holding Ltd."},
+                {"symbol": "BYND", "name": "Beyond Meat Inc."},
+                {"symbol": "CHWY", "name": "Chewy Inc."},
+                {"symbol": "DIS", "name": "Walt Disney Company"},
+                {"symbol": "DKNG", "name": "DraftKings Inc."},
+                {"symbol": "EBAY", "name": "eBay Inc."},
+                {"symbol": "ETSY", "name": "Etsy Inc."},
+                {"symbol": "HD", "name": "Home Depot Inc."},
+                {"symbol": "KO", "name": "Coca-Cola Company"},
+                {"symbol": "MCD", "name": "McDonald's Corporation"},
+                {"symbol": "NKE", "name": "Nike Inc."},
+                {"symbol": "PEP", "name": "PepsiCo Inc."},
                 {"symbol": "SBUX", "name": "Starbucks Corporation"},
                 {"symbol": "SHOP", "name": "Shopify Inc."},
-                {"symbol": "SNAP", "name": "Snap Inc."},
-                {"symbol": "SOFI", "name": "SoFi Technologies Inc."},
-                {"symbol": "SPY", "name": "SPDR S&P 500 ETF Trust"},
-                {"symbol": "SQ", "name": "Block Inc."},
-                {"symbol": "TSLA", "name": "Tesla Inc."},
-                {"symbol": "UBER", "name": "Uber Technologies Inc."},
-                {"symbol": "V", "name": "Visa Inc."},
+                {"symbol": "TGT", "name": "Target Corporation"},
                 {"symbol": "WMT", "name": "Walmart Inc."},
+                # EV / Automotive
+                {"symbol": "F", "name": "Ford Motor Company"},
+                {"symbol": "GM", "name": "General Motors Company"},
+                {"symbol": "LCID", "name": "Lucid Group Inc."},
+                {"symbol": "RIVN", "name": "Rivian Automotive Inc."},
+                {"symbol": "TSLA", "name": "Tesla Inc."},
+                # Finance / Fintech
+                {"symbol": "BAC", "name": "Bank of America Corporation"},
+                {"symbol": "C", "name": "Citigroup Inc."},
+                {"symbol": "COIN", "name": "Coinbase Global Inc."},
+                {"symbol": "GS", "name": "Goldman Sachs Group Inc."},
+                {"symbol": "HOOD", "name": "Robinhood Markets Inc."},
+                {"symbol": "JPM", "name": "JPMorgan Chase & Co."},
+                {"symbol": "MA", "name": "Mastercard Inc."},
+                {"symbol": "MSTR", "name": "MicroStrategy Inc."},
+                {"symbol": "PYPL", "name": "PayPal Holdings Inc."},
+                {"symbol": "SOFI", "name": "SoFi Technologies Inc."},
+                {"symbol": "SQ", "name": "Block Inc."},
+                {"symbol": "V", "name": "Visa Inc."},
+                # Healthcare / Pharma
+                {"symbol": "ABBV", "name": "AbbVie Inc."},
+                {"symbol": "BMY", "name": "Bristol-Myers Squibb"},
+                {"symbol": "JNJ", "name": "Johnson & Johnson"},
+                {"symbol": "LLY", "name": "Eli Lilly and Company"},
+                {"symbol": "MRNA", "name": "Moderna Inc."},
+                {"symbol": "NVO", "name": "Novo Nordisk A/S"},
+                {"symbol": "PFE", "name": "Pfizer Inc."},
+                {"symbol": "UNH", "name": "UnitedHealth Group Inc."},
+                # Aerospace / Defense
+                {"symbol": "BA", "name": "Boeing Company"},
+                {"symbol": "LMT", "name": "Lockheed Martin Corporation"},
+                {"symbol": "RTX", "name": "RTX Corporation"},
+                # Energy
+                {"symbol": "CVX", "name": "Chevron Corporation"},
                 {"symbol": "XOM", "name": "Exxon Mobil Corporation"},
+                # Social / Media / Entertainment
+                {"symbol": "ROKU", "name": "Roku Inc."},
+                {"symbol": "SNAP", "name": "Snap Inc."},
+                {"symbol": "SPOT", "name": "Spotify Technology S.A."},
+                {"symbol": "UBER", "name": "Uber Technologies Inc."},
                 {"symbol": "ZM", "name": "Zoom Video Communications Inc."},
+                # ETFs
+                {"symbol": "ARKK", "name": "ARK Innovation ETF"},
+                {"symbol": "DIA", "name": "SPDR Dow Jones Industrial Average ETF"},
+                {"symbol": "GLD", "name": "SPDR Gold Shares"},
+                {"symbol": "IWM", "name": "iShares Russell 2000 ETF"},
+                {"symbol": "QQQ", "name": "Invesco QQQ Trust"},
+                {"symbol": "SOXL", "name": "Direxion Daily Semiconductor Bull 3X"},
+                {"symbol": "SPY", "name": "SPDR S&P 500 ETF Trust"},
+                {"symbol": "TQQQ", "name": "ProShares UltraPro QQQ"},
+                {"symbol": "VIX", "name": "CBOE Volatility Index"},
+                {"symbol": "XLF", "name": "Financial Select Sector SPDR Fund"},
             ]
             query_upper = q.upper()
             # Prioritize symbols that start with query, then those that contain it
@@ -1593,13 +1715,38 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
                         if msg_type == "subscribe":
                             new_symbol = msg.get("symbol", "").upper()
-                            if new_symbol and subscription_manager:
+                            if new_symbol:
                                 logger.info(f"Client requesting symbol switch to {new_symbol}")
-                                # Switch symbol (unsubscribe old, subscribe new)
-                                await subscription_manager.switch_symbol(new_symbol)
-                                # Clear old data from aggregator
-                                if aggregator:
-                                    aggregator.clear()
+
+                                if mock_generator:
+                                    # Mock mode: switch symbol and send initial data
+                                    mock_generator.set_symbol(new_symbol)
+                                    # Send updated underlying data immediately
+                                    underlying = mock_generator.get_underlying()
+                                    await connection_manager._send_to_client(
+                                        websocket,
+                                        {
+                                            "type": "underlying_update",
+                                            "data": {
+                                                "symbol": underlying.symbol,
+                                                "price": underlying.price,
+                                                "ivRank": underlying.iv_rank,
+                                                "ivPercentile": underlying.iv_percentile,
+                                                "timestamp": underlying.timestamp,
+                                            },
+                                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                                        }
+                                    )
+                                    # Send all options for the new symbol
+                                    for option in mock_generator.get_all_options():
+                                        await on_option_update(option)
+                                elif subscription_manager:
+                                    # Real mode: switch subscription
+                                    await subscription_manager.switch_symbol(new_symbol)
+                                    # Clear old data from aggregator
+                                    if aggregator:
+                                        aggregator.clear()
+
                                 # Send confirmation
                                 await connection_manager._send_to_client(
                                     websocket,
