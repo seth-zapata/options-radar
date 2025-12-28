@@ -14,6 +14,7 @@ See spec section 8.3 for architecture.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -66,7 +67,14 @@ aggregator: DataAggregator | None = None
 alpaca_client: AlpacaOptionsClient | None = None
 orats_client: ORATSClient | None = None
 subscription_manager: SubscriptionManager | None = None
-mock_generator: MockDataGenerator | None = None
+
+# Multi-symbol mock mode support
+# Dictionary of symbol -> MockDataGenerator for all watchlist symbols
+mock_generators: dict[str, MockDataGenerator] = {}
+# Track which symbols are in the user's watchlist
+watchlist_symbols: set[str] = set()
+# The currently selected symbol (for UI focus)
+current_symbol: str = "QQQ"
 
 # Recommender and session tracking
 recommender = Recommender()
@@ -315,239 +323,247 @@ def get_option_key(option: AggregatedOptionData) -> str:
 
 
 async def gate_evaluation_loop() -> None:
-    """Background task to periodically evaluate gates and broadcast results."""
-    global mock_generator, aggregator, _last_recommendation_time
+    """Background task to periodically evaluate gates for ALL watchlist symbols."""
+    global mock_generators, watchlist_symbols, current_symbol, aggregator, _last_recommendation_time
 
-    logger.info("Starting gate evaluation loop (5s interval)")
+    logger.info("Starting gate evaluation loop (5s interval, multi-symbol)")
 
     while True:
         try:
             await asyncio.sleep(5)  # Evaluate every 5 seconds
 
-            # Get options and underlying
-            if mock_generator:
-                all_options = mock_generator.get_all_options()
-                underlying = mock_generator.get_underlying()
-            elif aggregator:
-                all_options = aggregator.get_all_options()
-                underlying = aggregator.get_underlying("NVDA")
-            else:
-                continue
-
-            if not all_options or not underlying:
-                continue
-
             now = datetime.now(timezone.utc)
             now_ts = now.timestamp()
 
-            # Filter to calls only for BUY_CALL evaluation
-            # Get options within reasonable strike range (ATM +/- 5 strikes)
-            atm_strike = round(underlying.price / 2.5) * 2.5
-            candidates = [
-                o for o in all_options
-                if o.canonical_id.right == "C"
-                and abs(o.canonical_id.strike - atm_strike) <= 12.5  # Within 5 strikes
-            ]
+            # Evaluate ALL symbols in the watchlist
+            symbols_to_evaluate = list(mock_generators.keys()) if mock_generators else []
 
-            if not candidates:
-                continue
+            if not symbols_to_evaluate and aggregator:
+                # Real mode - just evaluate the subscribed symbol
+                symbols_to_evaluate = ["NVDA"]
 
-            # Score all candidates and find the best one that passes gates
-            best_option = None
-            best_result = None
-            best_score = -1
-            best_confidence = 0
+            for symbol in symbols_to_evaluate:
+                # Get options and underlying for this symbol
+                if mock_generators and symbol in mock_generators:
+                    generator = mock_generators[symbol]
+                    all_options = generator.get_all_options()
+                    underlying = generator.get_underlying()
+                elif aggregator:
+                    all_options = aggregator.get_all_options()
+                    underlying = aggregator.get_underlying(symbol)
+                else:
+                    continue
 
-            for option in candidates:
-                # Check rate limiting
-                option_key = get_option_key(option)
-                last_rec_time = _last_recommendation_time.get(option_key, 0)
-                if now_ts - last_rec_time < RECOMMENDATION_COOLDOWN:
-                    continue  # Skip, recently recommended
+                if not all_options or not underlying:
+                    continue
 
-                # Score the option
-                score, confidence = score_option_candidate(option, underlying)
+                # Filter to calls only for BUY_CALL evaluation
+                # Get options within reasonable strike range (ATM +/- 5 strikes)
+                atm_strike = round(underlying.price / 2.5) * 2.5
+                candidates = [
+                    o for o in all_options
+                    if o.canonical_id.right == "C"
+                    and abs(o.canonical_id.strike - atm_strike) <= 12.5  # Within 5 strikes
+                ]
 
-                # Evaluate gates
-                result = evaluate_option_for_signal(
-                    option=option,
-                    underlying=underlying,
-                    action="BUY_CALL",
-                )
+                if not candidates:
+                    continue
 
-                if result.passed and score > best_score:
-                    best_option = option
-                    best_result = result
-                    best_score = score
-                    best_confidence = confidence
+                # Score all candidates and find the best one that passes gates
+                best_option = None
+                best_result = None
+                best_score = -1
+                best_confidence = 0
 
-            # If no passing candidate, just evaluate ATM for display
-            if best_option is None:
-                atm_option = min(
-                    candidates,
-                    key=lambda o: abs(o.canonical_id.strike - underlying.price)
-                )
-                result = evaluate_option_for_signal(
-                    option=atm_option,
-                    underlying=underlying,
-                    action="BUY_CALL",
-                )
-                display_option = atm_option
-            else:
-                result = best_result
-                display_option = best_option
+                for option in candidates:
+                    # Check rate limiting
+                    option_key = get_option_key(option)
+                    last_rec_time = _last_recommendation_time.get(option_key, 0)
+                    if now_ts - last_rec_time < RECOMMENDATION_COOLDOWN:
+                        continue  # Skip, recently recommended
 
-            # Format gate results for frontend
-            gate_results = [
-                {
-                    "name": g.gate_name,
-                    "passed": g.passed,
-                    "value": g.value,
-                    "threshold": g.threshold,
-                    "message": g.message,
-                }
-                for g in result.all_results
-            ]
+                    # Score the option
+                    score, confidence = score_option_candidate(option, underlying)
 
-            # Broadcast gate status with the option being evaluated
-            await connection_manager.broadcast({
-                "type": "gate_status",
-                "data": {
-                    "gates": gate_results,
-                    "evaluatedOption": {
-                        "strike": display_option.canonical_id.strike,
-                        "right": display_option.canonical_id.right,
-                        "expiry": display_option.canonical_id.expiry,
-                        "premium": display_option.mid,
-                    },
-                },
-                "timestamp": now.isoformat(),
-            })
+                    # Evaluate gates
+                    result = evaluate_option_for_signal(
+                        option=option,
+                        underlying=underlying,
+                        action="BUY_CALL",
+                    )
 
-            # Broadcast abstain status (null clears previous abstain)
-            if result.abstain or best_option is None:
-                if result.abstain:
-                    failed_gates = [
-                        {"name": g.gate_name, "message": g.message}
-                        for g in result.all_results if not g.passed
+                    if result.passed and score > best_score:
+                        best_option = option
+                        best_result = result
+                        best_score = score
+                        best_confidence = confidence
+
+                # Only broadcast gate status for the CURRENT symbol (UI focus)
+                if symbol == current_symbol:
+                    if best_option is None:
+                        atm_option = min(
+                            candidates,
+                            key=lambda o: abs(o.canonical_id.strike - underlying.price)
+                        )
+                        result = evaluate_option_for_signal(
+                            option=atm_option,
+                            underlying=underlying,
+                            action="BUY_CALL",
+                        )
+                        display_option = atm_option
+                    else:
+                        result = best_result
+                        display_option = best_option
+
+                    # Format gate results for frontend
+                    gate_results = [
+                        {
+                            "name": g.gate_name,
+                            "passed": g.passed,
+                            "value": g.value,
+                            "threshold": g.threshold,
+                            "message": g.message,
+                        }
+                        for g in result.all_results
                     ]
-                    await connection_manager.broadcast_abstain({
-                        "reason": result.abstain.reason.value,
-                        "resumeCondition": result.abstain.resume_condition,
-                        "failedGates": failed_gates,
+
+                    # Broadcast gate status with the option being evaluated
+                    await connection_manager.broadcast({
+                        "type": "gate_status",
+                        "data": {
+                            "gates": gate_results,
+                            "evaluatedOption": {
+                                "strike": display_option.canonical_id.strike,
+                                "right": display_option.canonical_id.right,
+                                "expiry": display_option.canonical_id.expiry,
+                                "premium": display_option.mid,
+                            },
+                        },
+                        "timestamp": now.isoformat(),
                     })
 
-                    # Log abstain for evaluation
-                    portfolio_state = {
-                        "total_exposure": position_tracker.get_total_exposure(),
-                        "open_position_count": len(position_tracker.get_open_positions()),
-                        "cash_available": 5000 - position_tracker.get_total_exposure(),
-                    }
-                    evaluation_logger.log_abstain(
-                        abstain=result.abstain,
+                    # Broadcast abstain status for current symbol only
+                    if result.abstain or best_option is None:
+                        if result.abstain:
+                            failed_gates = [
+                                {"name": g.gate_name, "message": g.message}
+                                for g in result.all_results if not g.passed
+                            ]
+                            await connection_manager.broadcast_abstain({
+                                "reason": result.abstain.reason.value,
+                                "resumeCondition": result.abstain.resume_condition,
+                                "failedGates": failed_gates,
+                            })
+
+                            # Log abstain for evaluation
+                            portfolio_state = {
+                                "total_exposure": position_tracker.get_total_exposure(),
+                                "open_position_count": len(position_tracker.get_open_positions()),
+                                "cash_available": 5000 - position_tracker.get_total_exposure(),
+                            }
+                            evaluation_logger.log_abstain(
+                                abstain=result.abstain,
+                                underlying=underlying,
+                                options=all_options,
+                                portfolio_state=portfolio_state,
+                                session_id=session_tracker.get_stats().session_id,
+                                failed_gates=failed_gates,
+                            )
+                    else:
+                        # Clear abstain status for current symbol
+                        await connection_manager.broadcast_abstain(None)
+
+                # Generate recommendation for ANY symbol that passes gates
+                if best_option is not None:
+                    recommendation = recommender.generate(
+                        result=best_result,
+                        option=best_option,
                         underlying=underlying,
-                        options=all_options,
-                        portfolio_state=portfolio_state,
-                        session_id=session_tracker.get_stats().session_id,
-                        failed_gates=failed_gates,
-                    )
-                # If best_option is None due to rate limiting, don't send abstain
-            else:
-                # Best option found - generate recommendation with calculated confidence
-                await connection_manager.broadcast_abstain(None)
-
-                # Override confidence in the result for the recommender
-                # We do this by generating with the result then adjusting
-                recommendation = recommender.generate(
-                    result=best_result,
-                    option=best_option,
-                    underlying=underlying,
-                    action="BUY_CALL",
-                )
-
-                if recommendation:
-                    # Create new recommendation with adjusted confidence
-                    from backend.engine.recommender import Recommendation
-                    adjusted_rec = Recommendation(
-                        id=recommendation.id,
-                        generated_at=recommendation.generated_at,
-                        underlying=recommendation.underlying,
-                        action=recommendation.action,
-                        strike=recommendation.strike,
-                        expiry=recommendation.expiry,
-                        right=recommendation.right,
-                        contracts=recommendation.contracts,
-                        premium=recommendation.premium,
-                        total_cost=recommendation.total_cost,
-                        confidence=best_confidence,  # Use our calculated confidence
-                        rationale=recommendation.rationale,
-                        gate_results=recommendation.gate_results,
-                        quote_age=recommendation.quote_age,
-                        greeks_age=recommendation.greeks_age,
-                        underlying_age=recommendation.underlying_age,
-                        valid_until=recommendation.valid_until,
+                        action="BUY_CALL",
                     )
 
-                    # Check session limits using confirmed position exposure only
-                    confirmed_exposure = position_tracker.get_total_exposure()
-                    max_exposure = 25000.0  # Session limit (50% of $50k portfolio)
-                    max_single_position = 10000.0  # Single position limit (20% of $50k portfolio)
-
-                    # Check if trade would exceed limits
-                    proposed_cost = adjusted_rec.total_cost
-                    if proposed_cost > max_single_position:
-                        allowed = False
-                        reason = f"Position ${proposed_cost:.0f} exceeds single position limit ${max_single_position:.0f}"
-                    elif confirmed_exposure + proposed_cost > max_exposure:
-                        allowed = False
-                        reason = f"Would exceed session limit: ${confirmed_exposure + proposed_cost:.0f} > ${max_exposure:.0f}"
-                    else:
-                        allowed = True
-                        reason = None
-
-                    if allowed:
-                        # Record recommendation time for rate limiting
-                        option_key = get_option_key(best_option)
-                        _last_recommendation_time[option_key] = now_ts
-
-                        # Add to session and broadcast
-                        session_tracker.add_recommendation(adjusted_rec)
-
-                        await connection_manager.broadcast({
-                            "type": "recommendation",
-                            "data": recommendation_to_dict(adjusted_rec),
-                            "timestamp": now.isoformat(),
-                        })
-
-                        # Log recommendation for evaluation
-                        portfolio_state = {
-                            "total_exposure": position_tracker.get_total_exposure(),
-                            "open_position_count": len(position_tracker.get_open_positions()),
-                            "cash_available": 5000 - position_tracker.get_total_exposure(),
-                        }
-                        evaluation_logger.log_recommendation(
-                            recommendation=adjusted_rec,
-                            underlying=underlying,
-                            options=all_options,
-                            portfolio_state=portfolio_state,
-                            session_id=session_tracker.get_stats().session_id,
+                    if recommendation:
+                        # Create new recommendation with adjusted confidence
+                        from backend.engine.recommender import Recommendation
+                        adjusted_rec = Recommendation(
+                            id=recommendation.id,
+                            generated_at=recommendation.generated_at,
+                            underlying=recommendation.underlying,
+                            action=recommendation.action,
+                            strike=recommendation.strike,
+                            expiry=recommendation.expiry,
+                            right=recommendation.right,
+                            contracts=recommendation.contracts,
+                            premium=recommendation.premium,
+                            total_cost=recommendation.total_cost,
+                            confidence=best_confidence,
+                            rationale=recommendation.rationale,
+                            gate_results=recommendation.gate_results,
+                            quote_age=recommendation.quote_age,
+                            greeks_age=recommendation.greeks_age,
+                            underlying_age=recommendation.underlying_age,
+                            valid_until=recommendation.valid_until,
                         )
 
-                        logger.info(
-                            f"Recommendation: {adjusted_rec.action} "
-                            f"{adjusted_rec.underlying} ${adjusted_rec.strike} "
-                            f"@ ${adjusted_rec.premium:.2f} "
-                            f"(score: {best_score:.0f}, conf: {best_confidence}%)"
-                        )
-                    else:
-                        logger.warning(f"Recommendation blocked: {reason}")
+                        # Check session limits
+                        confirmed_exposure = position_tracker.get_total_exposure()
+                        max_exposure = 25000.0
+                        max_single_position = 10000.0
 
-                # Always broadcast session stats after evaluation
-                await connection_manager.broadcast({
-                    "type": "session_status",
-                    "data": session_stats_to_dict(),
-                    "timestamp": now.isoformat(),
-                })
+                        proposed_cost = adjusted_rec.total_cost
+                        if proposed_cost > max_single_position:
+                            allowed = False
+                            reason = f"Position ${proposed_cost:.0f} exceeds single position limit ${max_single_position:.0f}"
+                        elif confirmed_exposure + proposed_cost > max_exposure:
+                            allowed = False
+                            reason = f"Would exceed session limit: ${confirmed_exposure + proposed_cost:.0f} > ${max_exposure:.0f}"
+                        else:
+                            allowed = True
+                            reason = None
+
+                        if allowed:
+                            # Record recommendation time for rate limiting
+                            option_key = get_option_key(best_option)
+                            _last_recommendation_time[option_key] = now_ts
+
+                            # Add to session and broadcast
+                            session_tracker.add_recommendation(adjusted_rec)
+
+                            await connection_manager.broadcast({
+                                "type": "recommendation",
+                                "data": recommendation_to_dict(adjusted_rec),
+                                "timestamp": now.isoformat(),
+                            })
+
+                            # Log recommendation for evaluation
+                            portfolio_state = {
+                                "total_exposure": position_tracker.get_total_exposure(),
+                                "open_position_count": len(position_tracker.get_open_positions()),
+                                "cash_available": 5000 - position_tracker.get_total_exposure(),
+                            }
+                            evaluation_logger.log_recommendation(
+                                recommendation=adjusted_rec,
+                                underlying=underlying,
+                                options=all_options,
+                                portfolio_state=portfolio_state,
+                                session_id=session_tracker.get_stats().session_id,
+                            )
+
+                            logger.info(
+                                f"Recommendation: {adjusted_rec.action} "
+                                f"{adjusted_rec.underlying} ${adjusted_rec.strike} "
+                                f"@ ${adjusted_rec.premium:.2f} "
+                                f"(score: {best_score:.0f}, conf: {best_confidence}%)"
+                            )
+                        else:
+                            logger.warning(f"Recommendation blocked for {symbol}: {reason}")
+
+            # Always broadcast session stats after evaluation cycle
+            await connection_manager.broadcast({
+                "type": "session_status",
+                "data": session_stats_to_dict(),
+                "timestamp": now.isoformat(),
+            })
 
         except asyncio.CancelledError:
             logger.info("Gate evaluation loop cancelled")
@@ -618,10 +634,31 @@ async def alpaca_message_loop() -> None:
         logger.error(f"Error in Alpaca message loop: {e}")
 
 
+def create_mock_generator_for_symbol(symbol: str) -> MockDataGenerator:
+    """Create a mock data generator for a specific symbol.
+
+    Each generator is independent and generates its own price/options data.
+    """
+    def mock_option_callback(option: AggregatedOptionData) -> None:
+        asyncio.create_task(on_option_update(option))
+
+    def mock_underlying_callback(underlying: UnderlyingData) -> None:
+        asyncio.create_task(on_underlying_update(underlying))
+
+    generator = MockDataGenerator(
+        on_option_update=mock_option_callback,
+        on_underlying_update=mock_underlying_callback,
+        update_interval=1.0,
+    )
+    generator.set_symbol(symbol)
+    return generator
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan - startup and shutdown."""
-    global aggregator, alpaca_client, orats_client, subscription_manager, mock_generator
+    global aggregator, alpaca_client, orats_client, subscription_manager
+    global mock_generators, watchlist_symbols, current_symbol
 
     logger.info("Starting OptionsRadar server...")
 
@@ -629,36 +666,30 @@ async def lifespan(app: FastAPI):
     if MOCK_MODE:
         logger.info("=" * 60)
         logger.info("MOCK DATA MODE ENABLED")
-        logger.info("  Using simulated NVDA options data")
+        logger.info("  Using simulated multi-symbol options data")
         logger.info("  Set MOCK_DATA=false to use real market data")
         logger.info("=" * 60)
 
-        # Set up mock data callbacks
-        def mock_option_callback(option: AggregatedOptionData) -> None:
-            asyncio.create_task(on_option_update(option))
+        # Default watchlist symbols
+        default_symbols = ["QQQ", "SPY"]
+        watchlist_symbols = set(default_symbols)
+        current_symbol = "QQQ"
 
-        def mock_underlying_callback(underlying: UnderlyingData) -> None:
-            asyncio.create_task(on_underlying_update(underlying))
+        # Create a mock generator for each watchlist symbol
+        for symbol in default_symbols:
+            generator = create_mock_generator_for_symbol(symbol)
+            mock_generators[symbol] = generator
 
-        mock_generator = MockDataGenerator(
-            on_option_update=mock_option_callback,
-            on_underlying_update=mock_underlying_callback,
-            update_interval=1.0,  # Update every second
-        )
+            # Generate initial data
+            underlying, options = generator.generate_initial_chain()
+            logger.info(f"Generated {len(options)} mock options for {symbol}")
 
-        # Generate initial data
-        underlying, options = mock_generator.generate_initial_chain()
-        logger.info(f"Generated {len(options)} mock options")
+            # Start streaming updates for this symbol
+            task = asyncio.create_task(generator.start_streaming())
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
 
-        # Send initial data to any connected clients
-        mock_underlying_callback(underlying)
-        for option in options:
-            mock_option_callback(option)
-
-        # Start streaming updates
-        task = asyncio.create_task(mock_generator.start_streaming())
-        _background_tasks.add(task)
-        task.add_done_callback(_background_tasks.discard)
+        logger.info(f"Tracking {len(mock_generators)} symbols: {list(mock_generators.keys())}")
 
         # Start gate evaluation loop
         task = asyncio.create_task(gate_evaluation_loop())
@@ -671,7 +702,8 @@ async def lifespan(app: FastAPI):
 
         # Shutdown mock mode
         logger.info("Shutting down OptionsRadar server...")
-        mock_generator.stop_streaming()
+        for symbol, generator in mock_generators.items():
+            generator.stop_streaming()
 
         for task in _background_tasks:
             task.cancel()
@@ -828,12 +860,14 @@ app.add_middleware(
 @app.get("/health")
 async def health_check() -> dict[str, Any]:
     """Health check endpoint."""
-    if mock_generator:
+    if mock_generators:
+        total_options = sum(g.option_count for g in mock_generators.values())
         return {
             "status": "healthy",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "connections": connection_manager.connection_count,
-            "optionsCount": mock_generator.option_count,
+            "optionsCount": total_options,
+            "symbolsTracked": len(mock_generators),
             "mockMode": True,
             "alpaca_connected": False,
             "orats_configured": False,
@@ -857,7 +891,7 @@ async def get_market_status() -> dict[str, Any]:
     from backend.data.market_hours import CT
 
     # In mock mode, simulate market as open
-    if mock_generator:
+    if mock_generators:
         now = datetime.now(CT)
         # Simulate market open 9:30 AM - 4:00 PM CT on weekdays
         weekday = now.weekday()
@@ -948,11 +982,12 @@ async def get_market_status() -> dict[str, Any]:
 
 @app.get("/api/options")
 async def get_options() -> dict[str, Any]:
-    """Get current snapshot of all options data."""
+    """Get current snapshot of all options data for the current symbol."""
     # Check mock mode first
-    if mock_generator:
-        options = mock_generator.get_all_options()
-        underlying = mock_generator.get_underlying()
+    if mock_generators and current_symbol in mock_generators:
+        generator = mock_generators[current_symbol]
+        options = generator.get_all_options()
+        underlying = generator.get_underlying()
         return {
             "options": [option_to_dict(opt) for opt in options],
             "underlying": underlying_to_dict(underlying),
@@ -1615,13 +1650,15 @@ async def stop_recording() -> dict[str, Any]:
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     """WebSocket endpoint for real-time updates."""
+    global current_symbol, watchlist_symbols  # Needed for modifying these in mock mode
     await connection_manager.connect(websocket)
 
     try:
         # Send initial data snapshot
-        if mock_generator:
-            # Mock mode - send mock data
-            options = mock_generator.get_all_options()
+        if mock_generators and current_symbol in mock_generators:
+            # Mock mode - send mock data for current symbol
+            generator = mock_generators[current_symbol]
+            options = generator.get_all_options()
             for option in options:
                 await connection_manager._send_to_client(
                     websocket,
@@ -1632,7 +1669,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     }
                 )
 
-            underlying = mock_generator.get_underlying()
+            underlying = generator.get_underlying()
             await connection_manager._send_to_client(
                 websocket,
                 {
@@ -1718,11 +1755,29 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                             if new_symbol:
                                 logger.info(f"Client requesting symbol switch to {new_symbol}")
 
-                                if mock_generator:
-                                    # Mock mode: switch symbol and send initial data
-                                    mock_generator.set_symbol(new_symbol)
+                                if MOCK_MODE:
+                                    # Mock mode: switch to symbol (add to watchlist if new)
+                                    # Add new symbol to watchlist if not already tracked
+                                    if new_symbol not in mock_generators:
+                                        logger.info(f"Adding {new_symbol} to watchlist")
+                                        generator = create_mock_generator_for_symbol(new_symbol)
+                                        mock_generators[new_symbol] = generator
+                                        watchlist_symbols.add(new_symbol)
+
+                                        # Generate initial data for new symbol
+                                        generator.generate_initial_chain()
+
+                                        # Start streaming for new symbol
+                                        task = asyncio.create_task(generator.start_streaming())
+                                        _background_tasks.add(task)
+                                        task.add_done_callback(_background_tasks.discard)
+
+                                    # Update current symbol (for UI focus)
+                                    current_symbol = new_symbol
+
                                     # Send updated underlying data immediately
-                                    underlying = mock_generator.get_underlying()
+                                    generator = mock_generators[new_symbol]
+                                    underlying = generator.get_underlying()
                                     await connection_manager._send_to_client(
                                         websocket,
                                         {
@@ -1738,7 +1793,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                                         }
                                     )
                                     # Send all options for the new symbol
-                                    for option in mock_generator.get_all_options():
+                                    for option in generator.get_all_options():
                                         await on_option_update(option)
                                 elif subscription_manager:
                                     # Real mode: switch subscription
