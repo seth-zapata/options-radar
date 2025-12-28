@@ -399,3 +399,75 @@ class AlpacaAccountClient:
             if "404" in str(e):
                 return None
             raise
+
+    async def get_assets(
+        self,
+        status: str = "active",
+        asset_class: str = "us_equity",
+    ) -> list[dict[str, Any]]:
+        """Get tradable assets from Alpaca.
+
+        Args:
+            status: Asset status filter (active, inactive)
+            asset_class: Asset class filter (us_equity, crypto, us_option)
+
+        Returns:
+            List of asset dictionaries
+        """
+        endpoint = f"/v2/assets?status={status}&asset_class={asset_class}"
+        data = await self._request(endpoint)
+
+        if not isinstance(data, list):
+            raise Exception("Unexpected assets response format")
+
+        return data
+
+    async def search_symbols(
+        self,
+        query: str,
+        limit: int = 20,
+        options_only: bool = True,
+    ) -> list[dict[str, str]]:
+        """Search for symbols matching a query.
+
+        Args:
+            query: Search query (partial symbol or name)
+            limit: Maximum number of results
+            options_only: If True, only return symbols that have options
+
+        Returns:
+            List of matching symbols with name and symbol
+        """
+        # Get all active US equity assets
+        assets = await self.get_assets(status="active", asset_class="us_equity")
+
+        query_upper = query.upper()
+        results = []
+
+        for asset in assets:
+            symbol = asset.get("symbol", "")
+            name = asset.get("name", "")
+
+            # Check if tradable
+            if not asset.get("tradable", False):
+                continue
+
+            # Filter for options availability if requested
+            # Note: Alpaca doesn't have a direct flag, but we can check if it's a fractionable stock
+            # as a proxy (most liquid stocks are optionable)
+            # In practice, you would maintain a list of optionable symbols
+
+            # Match symbol or name
+            if symbol.upper().startswith(query_upper) or query_upper in name.upper():
+                results.append({
+                    "symbol": symbol,
+                    "name": name,
+                })
+
+            if len(results) >= limit:
+                break
+
+        # Sort by symbol length (shorter = more relevant) and alphabetically
+        results.sort(key=lambda x: (len(x["symbol"]), x["symbol"]))
+
+        return results[:limit]

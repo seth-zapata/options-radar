@@ -4,6 +4,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { useOptionsStore, CORE_SYMBOLS } from '../store/optionsStore';
+import { SymbolSearch } from './SymbolSearch';
 
 interface MarketInfo {
   isOpen: boolean;
@@ -47,24 +48,6 @@ export function StatusBar() {
   const [countdown, setCountdown] = useState<number | null>(null);
   const [lastFetchTime, setLastFetchTime] = useState<number>(0);
   const [showAddSymbol, setShowAddSymbol] = useState(false);
-  const [newSymbol, setNewSymbol] = useState('');
-
-  const handleAddSymbol = () => {
-    if (newSymbol.trim()) {
-      addToWatchlist(newSymbol.trim().toUpperCase());
-      setNewSymbol('');
-      setShowAddSymbol(false);
-    }
-  };
-
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') {
-      handleAddSymbol();
-    } else if (e.key === 'Escape') {
-      setShowAddSymbol(false);
-      setNewSymbol('');
-    }
-  };
 
   // Fetch market status from API
   const fetchMarketStatus = useCallback(async () => {
@@ -140,8 +123,8 @@ export function StatusBar() {
 
           {/* Symbol and Price */}
           <span className="text-slate-400">|</span>
-          <span className="text-lg font-semibold">{underlying?.symbol || 'NVDA'}</span>
-          {underlying && (
+          <span className="text-lg font-semibold">{activeSymbol}</span>
+          {underlying && underlying.symbol === activeSymbol && (
             <span className="text-lg font-mono">${underlying.price.toFixed(2)}</span>
           )}
         </div>
@@ -185,7 +168,7 @@ export function StatusBar() {
           </div>
 
           {/* IV Rank */}
-          {underlying && (
+          {underlying && underlying.symbol === activeSymbol && (
             <div className="text-sm">
               <span className="text-slate-400">IV Rank:</span>{' '}
               <span className={underlying.ivRank > 50 ? 'text-orange-400' : 'text-blue-400'}>
@@ -246,35 +229,15 @@ export function StatusBar() {
           );
         })}
 
-        {/* Add Symbol Button/Input */}
+        {/* Add Symbol Button/Search */}
         {showAddSymbol ? (
-          <div className="flex items-center">
-            <input
-              type="text"
-              value={newSymbol}
-              onChange={(e) => setNewSymbol(e.target.value.toUpperCase())}
-              onKeyDown={handleKeyPress}
-              placeholder="SYMBOL"
-              className="w-20 px-2 py-1 text-sm bg-slate-600 text-white rounded-l border-0 focus:ring-1 focus:ring-indigo-500 outline-none placeholder-slate-400"
-              autoFocus
-              maxLength={5}
-            />
-            <button
-              onClick={handleAddSymbol}
-              className="px-2 py-1 bg-green-600 hover:bg-green-500 text-white text-sm rounded-r"
-            >
-              +
-            </button>
-            <button
-              onClick={() => {
-                setShowAddSymbol(false);
-                setNewSymbol('');
-              }}
-              className="ml-1 px-2 py-1 bg-slate-500 hover:bg-slate-400 text-white text-sm rounded"
-            >
-              ×
-            </button>
-          </div>
+          <SymbolSearch
+            onSelect={(symbol) => {
+              addToWatchlist(symbol);
+              setShowAddSymbol(false);
+            }}
+            onCancel={() => setShowAddSymbol(false)}
+          />
         ) : (
           <button
             onClick={() => setShowAddSymbol(true)}

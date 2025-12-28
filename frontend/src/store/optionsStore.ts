@@ -3,7 +3,7 @@
  */
 
 import { create } from 'zustand';
-import type { OptionData, UnderlyingData, AbstainData, ConnectionStatus, GateResult, Recommendation, SessionStatus, TrackedPosition, ExitSignal } from '../types';
+import type { OptionData, UnderlyingData, AbstainData, ConnectionStatus, GateResult, Recommendation, SessionStatus, TrackedPosition, ExitSignal, HotPicks } from '../types';
 import { optionKey } from '../types';
 
 export interface EvaluatedOption {
@@ -41,6 +41,32 @@ const saveWatchlist = (symbols: string[]) => {
   }
 };
 
+// Track dismissed recommendation IDs in localStorage
+const getDismissedRecIds = (): Set<string> => {
+  try {
+    const saved = localStorage.getItem('options-radar-dismissed-recs');
+    if (saved) {
+      return new Set(JSON.parse(saved));
+    }
+  } catch (e) {
+    console.error('Failed to load dismissed recommendations:', e);
+  }
+  return new Set();
+};
+
+const saveDismissedRecIds = (ids: Set<string>) => {
+  try {
+    // Keep only last 100 dismissed IDs to prevent unbounded growth
+    const idsArray = Array.from(ids).slice(-100);
+    localStorage.setItem('options-radar-dismissed-recs', JSON.stringify(idsArray));
+  } catch (e) {
+    console.error('Failed to save dismissed recommendations:', e);
+  }
+};
+
+// Initialize dismissed IDs
+let dismissedRecIds = getDismissedRecIds();
+
 interface OptionsState {
   // Connection
   connectionStatus: ConnectionStatus;
@@ -67,6 +93,12 @@ interface OptionsState {
   positions: TrackedPosition[];
   exitSignals: ExitSignal[];
 
+  // Scanner
+  scannerData: HotPicks | null;
+  scannerLoading: boolean;
+  scannerError: string | null;
+  scannerLastUpdate: string | null;
+
   // Actions
   setConnectionStatus: (status: ConnectionStatus) => void;
   updateOption: (option: OptionData) => void;
@@ -84,6 +116,9 @@ interface OptionsState {
   removeFromWatchlist: (symbol: string) => void;
   dismissRecommendation: (recId: string) => void;
   clearExpiredRecommendations: () => void;
+  setScannerData: (data: HotPicks) => void;
+  setScannerLoading: (loading: boolean) => void;
+  setScannerError: (error: string | null) => void;
   clearAll: () => void;
 }
 
@@ -104,6 +139,10 @@ export const useOptionsStore = create<OptionsState>((set) => ({
   sessionStatus: null,
   positions: [],
   exitSignals: [],
+  scannerData: null,
+  scannerLoading: false,
+  scannerError: null,
+  scannerLastUpdate: null,
 
   // Actions
   setConnectionStatus: (status) => set({ connectionStatus: status }),
@@ -130,6 +169,12 @@ export const useOptionsStore = create<OptionsState>((set) => ({
   }),
 
   addRecommendation: (rec) => set((state) => {
+    // Skip if already dismissed
+    if (dismissedRecIds.has(rec.id)) return state;
+
+    // Skip if already expired
+    if (new Date(rec.validUntil) < new Date()) return state;
+
     // Check if recommendation already exists (by ID)
     const exists = state.recommendations.some((r) => r.id === rec.id);
     if (exists) return state;
@@ -205,18 +250,41 @@ export const useOptionsStore = create<OptionsState>((set) => ({
     };
   }),
 
-  dismissRecommendation: (recId) => set((state) => ({
-    recommendations: state.recommendations.filter(r => r.id !== recId),
-  })),
+  dismissRecommendation: (recId) => set((state) => {
+    // Add to dismissed set and persist
+    dismissedRecIds.add(recId);
+    saveDismissedRecIds(dismissedRecIds);
+    return {
+      recommendations: state.recommendations.filter(r => r.id !== recId),
+    };
+  }),
 
   clearExpiredRecommendations: () => set((state) => {
     const now = new Date();
+    const expired = state.recommendations.filter(r => new Date(r.validUntil) <= now);
+    // Add all expired to dismissed set
+    expired.forEach(r => dismissedRecIds.add(r.id));
+    saveDismissedRecIds(dismissedRecIds);
     return {
       recommendations: state.recommendations.filter(r => {
         // Filter out expired recommendations (validUntil has passed)
         return new Date(r.validUntil) > now;
       }),
     };
+  }),
+
+  setScannerData: (data) => set({
+    scannerData: data,
+    scannerLoading: false,
+    scannerError: null,
+    scannerLastUpdate: new Date().toLocaleTimeString(),
+  }),
+
+  setScannerLoading: (loading) => set({ scannerLoading: loading }),
+
+  setScannerError: (error) => set({
+    scannerError: error,
+    scannerLoading: false,
   }),
 
   clearAll: () => set({

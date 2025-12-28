@@ -91,8 +91,11 @@ export function ChainView() {
   const underlying = useOptionsStore((state) => state.underlying);
   const atmStrike = underlying?.price ?? null;
 
+  // Filter out expired options (DTE <= 0) and sort
   const expiries = useMemo(() =>
-    Array.from(optionsByExpiry.keys()).sort(),
+    Array.from(optionsByExpiry.keys())
+      .filter((exp) => getDTE(exp) > 0)
+      .sort(),
     [optionsByExpiry]
   );
 

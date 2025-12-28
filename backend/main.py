@@ -26,7 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from backend.config import load_config
-from backend.data import AlpacaOptionsClient, DataAggregator, MockDataGenerator, ORATSClient, SubscriptionManager
+from backend.data import AlpacaAccountClient, AlpacaOptionsClient, DataAggregator, MockDataGenerator, ORATSClient, SubscriptionManager
 from backend.data.aggregator import AggregatedOptionData
 from backend.engine import (
     GatingPipeline,
@@ -1232,6 +1232,55 @@ async def get_watchlist() -> dict[str, Any]:
         "symbols": list(config.watchlist),
         "count": len(config.watchlist),
     }
+
+
+@app.get("/api/symbols/search")
+async def search_symbols(q: str, limit: int = 20) -> dict[str, Any]:
+    """Search for symbols matching a query.
+
+    Args:
+        q: Search query (partial symbol or company name)
+        limit: Maximum number of results (default 20)
+
+    Returns:
+        List of matching symbols with company names
+    """
+    if not q or len(q) < 1:
+        return {"results": [], "count": 0}
+
+    try:
+        # In mock mode, return some common symbols
+        if MOCK_MODE:
+            mock_symbols = [
+                {"symbol": "AAPL", "name": "Apple Inc."},
+                {"symbol": "AMZN", "name": "Amazon.com Inc."},
+                {"symbol": "GOOG", "name": "Alphabet Inc."},
+                {"symbol": "GOOGL", "name": "Alphabet Inc. Class A"},
+                {"symbol": "META", "name": "Meta Platforms Inc."},
+                {"symbol": "MSFT", "name": "Microsoft Corporation"},
+                {"symbol": "NFLX", "name": "Netflix Inc."},
+                {"symbol": "NVDA", "name": "NVIDIA Corporation"},
+                {"symbol": "PLTR", "name": "Palantir Technologies Inc."},
+                {"symbol": "QQQ", "name": "Invesco QQQ Trust"},
+                {"symbol": "SPY", "name": "SPDR S&P 500 ETF Trust"},
+                {"symbol": "TSLA", "name": "Tesla Inc."},
+            ]
+            query_upper = q.upper()
+            results = [
+                s for s in mock_symbols
+                if s["symbol"].startswith(query_upper) or query_upper in s["name"].upper()
+            ][:limit]
+            return {"results": results, "count": len(results)}
+
+        # Real mode: use Alpaca API
+        config = load_config()
+        account_client = AlpacaAccountClient(config=config.alpaca)
+        results = await account_client.search_symbols(q, limit=limit)
+        return {"results": results, "count": len(results)}
+
+    except Exception as e:
+        logger.error(f"Error searching symbols: {e}")
+        return {"results": [], "count": 0, "error": str(e)}
 
 
 # ============================================================================

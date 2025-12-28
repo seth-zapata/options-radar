@@ -5,6 +5,7 @@
 
 import { useState } from 'react';
 import { useOptionsStream } from './hooks/useOptionsStream';
+import { useScannerData } from './hooks/useScannerData';
 import { useOptionsStore } from './store/optionsStore';
 import { StatusBar } from './components/StatusBar';
 import { ChainView } from './components/ChainView';
@@ -18,6 +19,9 @@ type RightPanelTab = 'signals' | 'scanner' | 'positions';
 function App() {
   // Connect to WebSocket
   useOptionsStream();
+
+  // Fetch scanner data on app start
+  useScannerData();
 
   // Get state for tab badges
   const recommendations = useOptionsStore((state) => state.recommendations);

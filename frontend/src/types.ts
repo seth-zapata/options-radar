@@ -132,6 +132,46 @@ export interface ExitSignal {
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
 
+// Scanner types
+export interface WSBTrending {
+  symbol: string;
+  mentions24h: number;
+  sentiment: number;
+  sentimentScore: number;
+  rank: number;
+  buzzLevel: string;
+  isBullish: boolean;
+}
+
+export interface ScanResult {
+  symbol: string;
+  score: number;
+  direction: string;
+  isOpportunity: boolean;
+  isStrongOpportunity: boolean;
+  signals: string[];
+  sentiment: {
+    scores: {
+      news: number;
+      wsb: number;
+      combined: number;
+    };
+    signal: string;
+    strength: string;
+    flags: {
+      newsBuzzing: boolean;
+      wsbTrending: boolean;
+      wsbBullish: boolean;
+      sourcesAligned: boolean;
+    };
+  } | null;
+}
+
+export interface HotPicks {
+  wsbTrending: WSBTrending[];
+  topOpportunities: ScanResult[];
+}
+
 export interface WebSocketMessage {
   type: 'option_update' | 'underlying_update' | 'gate_status' | 'abstain' | 'connection_status' | 'error' | 'ping' | 'recommendation' | 'session_status' | 'position_opened' | 'position_closed' | 'exit_signal' | 'symbol_changed';
   data?: unknown;
