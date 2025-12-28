@@ -132,8 +132,8 @@ class PortfolioState:
         sector_exposures: Dict of sector -> exposure percent
         current_positions: Set of underlying symbols with positions
     """
-    available_cash: float = 10000.0
-    portfolio_value: float = 10000.0
+    available_cash: float = 50000.0
+    portfolio_value: float = 50000.0
     sector_exposures: dict[str, float] = field(default_factory=dict)
     current_positions: set[str] = field(default_factory=set)
 

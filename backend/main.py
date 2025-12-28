@@ -490,8 +490,8 @@ async def gate_evaluation_loop() -> None:
 
                     # Check session limits using confirmed position exposure only
                     confirmed_exposure = position_tracker.get_total_exposure()
-                    max_exposure = 5000.0  # Session limit
-                    max_single_position = 1000.0  # Single position limit
+                    max_exposure = 25000.0  # Session limit (50% of $50k portfolio)
+                    max_single_position = 10000.0  # Single position limit (20% of $50k portfolio)
 
                     # Check if trade would exceed limits
                     proposed_cost = adjusted_rec.total_cost

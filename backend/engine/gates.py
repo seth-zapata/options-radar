@@ -122,7 +122,7 @@ class GateContext:
     contracts: int = 1
     premium: float = 0.0
     available_cash: float = 0.0
-    portfolio_value: float = 10000.0  # Default for testing
+    portfolio_value: float = 50000.0  # Default for testing
 
     # Sector exposure
     current_sector_exposure_percent: float = 0.0
@@ -475,8 +475,7 @@ class CashAvailableGate(Gate):
 class PositionSizeLimitGate(Gate):
     """Ensures position size doesn't exceed portfolio limits (20%).
 
-    With a $5,000 portfolio, 20% = $1,000 max per position,
-    which aligns with the single position limit in session tracker.
+    With a $50,000 portfolio, 20% = $10,000 max per position.
     """
 
     MAX_PERCENT = 20.0

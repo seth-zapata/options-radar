@@ -28,8 +28,8 @@ class SessionConfig:
         max_recommendations: Maximum recommendations to keep in history
         exposure_warning_threshold: Warn when approaching max (0-1)
     """
-    max_session_exposure: float = 5000.0  # $5,000 total
-    max_single_position: float = 1000.0   # $1,000 per position
+    max_session_exposure: float = 25000.0  # $25,000 total (50% of $50k portfolio)
+    max_single_position: float = 10000.0   # $10,000 per position (20% of $50k portfolio)
     max_recommendations: int = 100        # Keep last 100 recommendations
     exposure_warning_threshold: float = 0.8  # Warn at 80%
 
