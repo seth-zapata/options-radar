@@ -942,6 +942,19 @@ async def open_position(request: OpenPositionRequest) -> dict[str, Any]:
     if not rec:
         return {"error": f"Recommendation not found: {request.recommendation_id}"}
 
+    # Check exposure limit before opening
+    proposed_cost = request.fill_price * request.contracts * 100
+    current_exposure = position_tracker.get_total_exposure()
+    exposure_limit = 5000.0  # $5k session limit
+
+    if current_exposure + proposed_cost > exposure_limit:
+        remaining = exposure_limit - current_exposure
+        return {
+            "error": f"Trade would exceed session limit. Current: ${current_exposure:.0f}, "
+                     f"Trade: ${proposed_cost:.0f}, Limit: ${exposure_limit:.0f}, "
+                     f"Remaining: ${remaining:.0f}"
+        }
+
     try:
         position = position_tracker.open_position(
             recommendation_id=request.recommendation_id,

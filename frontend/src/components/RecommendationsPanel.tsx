@@ -210,16 +210,28 @@ function RecommendationCard({ rec, isLatest, isConfirmed }: { rec: Recommendatio
         ? 'text-yellow-600'
         : 'text-red-600';
 
+  // Determine card styling based on state
+  const cardStyles = isConfirmed
+    ? 'bg-green-50 ring-2 ring-green-500 border-green-300'  // Confirmed: green highlight
+    : expired
+      ? 'opacity-50 bg-slate-50'  // Expired: dimmed
+      : isLatest
+        ? 'bg-white ring-2 ring-indigo-300'  // Latest: indigo ring
+        : 'bg-white';  // Default
+
   return (
-    <div
-      className={`border rounded-lg overflow-hidden ${
-        expired ? 'opacity-50 bg-slate-50' : isLatest ? 'bg-white ring-2 ring-indigo-300' : 'bg-white'
-      }`}
-    >
+    <div className={`border rounded-lg overflow-hidden ${cardStyles}`}>
       {/* Header */}
       <div className={`px-3 py-2 ${actionColors[rec.action] || 'bg-slate-500 text-white'}`}>
         <div className="flex items-center justify-between">
-          <span className="font-bold">{formatAction(rec.action)}</span>
+          <div className="flex items-center gap-2">
+            <span className="font-bold">{formatAction(rec.action)}</span>
+            {isConfirmed && (
+              <span className="px-1.5 py-0.5 bg-white/20 rounded text-xs font-medium">
+                CONFIRMED
+              </span>
+            )}
+          </div>
           <span className="text-sm opacity-90">
             {formatTimeAgo(rec.generatedAt)}
             {expired && ' (expired)'}
