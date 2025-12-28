@@ -1133,6 +1133,108 @@ async def get_evaluation_summary() -> dict[str, Any]:
 
 
 # ============================================================================
+# Scanner API Endpoints
+# ============================================================================
+
+# Lazy-initialized scanner (uses API keys)
+_daily_scanner = None
+
+
+def get_scanner():
+    """Get or create the daily scanner instance."""
+    global _daily_scanner
+    if _daily_scanner is None:
+        from backend.engine.scanner import DailyScanner
+        config = load_config()
+        _daily_scanner = DailyScanner(config)
+    return _daily_scanner
+
+
+@app.get("/api/scanner/hot-picks")
+async def get_hot_picks() -> dict[str, Any]:
+    """Get curated hot picks from sentiment sources.
+
+    Returns:
+        WSB trending and top opportunities
+    """
+    try:
+        scanner = get_scanner()
+        picks = await scanner.get_hot_picks()
+        return {
+            "wsbTrending": picks.get("wsbTrending", []),
+            "topOpportunities": picks.get("topOpportunities", []),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"Error fetching hot picks: {e}")
+        return {
+            "wsbTrending": [],
+            "topOpportunities": [],
+            "error": str(e),
+        }
+
+
+@app.get("/api/scanner/sentiment/{symbol}")
+async def get_symbol_sentiment(symbol: str) -> dict[str, Any]:
+    """Get combined sentiment for a specific symbol.
+
+    Args:
+        symbol: Stock symbol (e.g., "NVDA")
+
+    Returns:
+        Combined sentiment data
+    """
+    try:
+        scanner = get_scanner()
+        if scanner._sentiment_aggregator:
+            sentiment = await scanner._sentiment_aggregator.get_sentiment(symbol)
+            return {
+                "symbol": symbol,
+                "sentiment": sentiment.to_dict(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        return {"error": "Sentiment aggregator not configured"}
+    except Exception as e:
+        logger.error(f"Error fetching sentiment for {symbol}: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/scanner/scan")
+async def run_scanner(symbols: str | None = None) -> dict[str, Any]:
+    """Run the daily scanner on specified symbols.
+
+    Args:
+        symbols: Comma-separated list of symbols (default: watchlist)
+
+    Returns:
+        Scan results sorted by score
+    """
+    try:
+        scanner = get_scanner()
+        symbol_list = symbols.split(",") if symbols else None
+        results = await scanner.scan(symbols=symbol_list)
+        return {
+            "results": [r.to_dict() for r in results],
+            "opportunityCount": len([r for r in results if r.is_opportunity]),
+            "strongOpportunityCount": len([r for r in results if r.is_strong_opportunity]),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"Error running scanner: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/config/watchlist")
+async def get_watchlist() -> dict[str, Any]:
+    """Get the configured watchlist symbols."""
+    config = load_config()
+    return {
+        "symbols": list(config.watchlist),
+        "count": len(config.watchlist),
+    }
+
+
+# ============================================================================
 # Replay API Endpoints
 # ============================================================================
 
