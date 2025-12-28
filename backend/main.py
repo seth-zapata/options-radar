@@ -85,9 +85,11 @@ metrics_calculator = MetricsCalculator()
 session_recorder = SessionRecorder(persist_path="./logs/replays")
 session_replayer = SessionReplayer(persist_path="./logs/replays")
 
-# Rate limiting: track last recommendation time per contract
-_last_recommendation_time: dict[str, float] = {}
+# Rate limiting: track last recommendation time per contract AND per symbol
+_last_recommendation_time: dict[str, float] = {}  # Per contract (symbol+strike+expiry+right)
+_last_symbol_recommendation_time: dict[str, float] = {}  # Per underlying symbol
 RECOMMENDATION_COOLDOWN = 60.0  # Don't recommend same contract within 60 seconds
+SYMBOL_COOLDOWN = 60.0  # Don't recommend same underlying within 60 seconds
 
 # Background tasks
 _background_tasks: set[asyncio.Task] = set()
@@ -338,7 +340,8 @@ def get_option_key(option: AggregatedOptionData) -> str:
 
 async def gate_evaluation_loop() -> None:
     """Background task to periodically evaluate gates for ALL watchlist symbols."""
-    global mock_generators, watchlist_symbols, current_symbol, aggregator, _last_recommendation_time
+    global mock_generators, watchlist_symbols, current_symbol, aggregator
+    global _last_recommendation_time, _last_symbol_recommendation_time
 
     logger.info("Starting gate evaluation loop (5s interval, multi-symbol)")
 
@@ -357,6 +360,10 @@ async def gate_evaluation_loop() -> None:
                 symbols_to_evaluate = ["NVDA"]
 
             for symbol in symbols_to_evaluate:
+                # Check per-symbol rate limit (skip signal generation, but still evaluate for UI)
+                last_symbol_rec_time = _last_symbol_recommendation_time.get(symbol, 0)
+                symbol_on_cooldown = (now_ts - last_symbol_rec_time) < SYMBOL_COOLDOWN
+
                 # Get options and underlying for this symbol
                 if mock_generators and symbol in mock_generators:
                     generator = mock_generators[symbol]
@@ -498,8 +505,8 @@ async def gate_evaluation_loop() -> None:
                         # Clear abstain status for current symbol
                         await connection_manager.broadcast_abstain(None)
 
-                # Generate recommendation for ANY symbol that passes gates
-                if best_option is not None:
+                # Generate recommendation for ANY symbol that passes gates (if not on cooldown)
+                if best_option is not None and not symbol_on_cooldown:
                     recommendation = recommender.generate(
                         result=best_result,
                         option=best_option,
@@ -547,9 +554,10 @@ async def gate_evaluation_loop() -> None:
                             reason = None
 
                         if allowed:
-                            # Record recommendation time for rate limiting
+                            # Record recommendation time for rate limiting (both contract and symbol)
                             option_key = get_option_key(best_option)
                             _last_recommendation_time[option_key] = now_ts
+                            _last_symbol_recommendation_time[symbol] = now_ts
 
                             # Add to session and broadcast
                             session_tracker.add_recommendation(adjusted_rec)
@@ -695,13 +703,22 @@ async def lifespan(app: FastAPI):
         logger.info("  Set MOCK_DATA=false to use real market data")
         logger.info("=" * 60)
 
-        # Default watchlist symbols
-        default_symbols = ["QQQ", "SPY"]
-        watchlist_symbols = set(default_symbols)
-        current_symbol = "QQQ"
+        # Load watchlist from config (use default if config load fails)
+        try:
+            config = load_config()
+            all_symbols = list(config.watchlist)
+        except ValueError:
+            # No API keys configured, use default watchlist
+            all_symbols = [
+                "NVDA", "TSLA", "PLTR", "COIN", "MARA", "RKLB", "ASTS",
+                "QQQ", "AAPL", "SPY", "AMD", "GOOGL", "AMZN", "META", "MSFT", "GME", "SMCI",
+            ]
+
+        watchlist_symbols = set(all_symbols)
+        current_symbol = all_symbols[0] if all_symbols else "SPY"
 
         # Create a mock generator for each watchlist symbol
-        for symbol in default_symbols:
+        for symbol in all_symbols:
             generator = create_mock_generator_for_symbol(symbol)
             mock_generators[symbol] = generator
 
