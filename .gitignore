@@ -50,3 +50,4 @@ build/
 htmlcov/
 .coverage
 coverage.xml
+data/
