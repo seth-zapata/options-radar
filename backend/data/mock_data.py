@@ -25,7 +25,8 @@ BASE_PRICE = 137.50
 PRICE_VOLATILITY = 0.002  # 0.2% per update
 
 # Option chain configuration
-EXPIRATIONS_WEEKS = [1, 2, 3, 4, 8]  # Weeks out
+# Weekly options for near-term, then monthly, then quarterly for LEAPS
+EXPIRATIONS_WEEKS = [1, 2, 3, 4, 6, 8, 12, 16, 26, 39, 52, 78, 104]  # Weeks out (up to 2 years)
 STRIKES_AROUND_ATM = 10  # Strikes above and below ATM
 STRIKE_INCREMENT = 2.50  # $2.50 strike increments
 

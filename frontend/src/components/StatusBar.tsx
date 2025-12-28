@@ -32,6 +32,8 @@ function formatDuration(totalSeconds: number): string {
   return parts.join(' ');
 }
 
+const API_BASE = 'http://localhost:8000';
+
 export function StatusBar() {
   const {
     connectionStatus,
@@ -43,11 +45,34 @@ export function StatusBar() {
     watchlist,
     addToWatchlist,
     removeFromWatchlist,
+    symbolNames,
+    setSymbolName,
+    clearExpiredRecommendations,
   } = useOptionsStore();
   const [marketInfo, setMarketInfo] = useState<MarketInfo | null>(null);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [lastFetchTime, setLastFetchTime] = useState<number>(0);
   const [showAddSymbol, setShowAddSymbol] = useState(false);
+
+  // Auto-clear expired recommendations every 10 seconds
+  useEffect(() => {
+    const interval = setInterval(clearExpiredRecommendations, 10000);
+    return () => clearInterval(interval);
+  }, [clearExpiredRecommendations]);
+
+  // Fetch company name when active symbol changes and we don't have it
+  useEffect(() => {
+    if (activeSymbol && !symbolNames[activeSymbol]) {
+      fetch(`${API_BASE}/api/symbols/search?q=${activeSymbol}&limit=1`)
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.results?.length > 0 && data.results[0].symbol === activeSymbol) {
+            setSymbolName(activeSymbol, data.results[0].name);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [activeSymbol, symbolNames, setSymbolName]);
 
   // Fetch market status from API
   const fetchMarketStatus = useCallback(async () => {
@@ -121,11 +146,18 @@ export function StatusBar() {
         <div className="flex items-center gap-4">
           <h1 className="text-xl font-bold">OptionsRadar</h1>
 
-          {/* Symbol and Price */}
+          {/* Symbol, Company Name, and Price */}
           <span className="text-slate-400">|</span>
-          <span className="text-lg font-semibold">{activeSymbol}</span>
+          <div className="flex items-center gap-2">
+            <span className="text-lg font-semibold">{activeSymbol}</span>
+            {symbolNames[activeSymbol] && (
+              <span className="text-sm text-slate-400 max-w-[200px] truncate">
+                {symbolNames[activeSymbol]}
+              </span>
+            )}
+          </div>
           {underlying && underlying.symbol === activeSymbol && (
-            <span className="text-lg font-mono">${underlying.price.toFixed(2)}</span>
+            <span className="text-lg font-mono text-green-400">${underlying.price.toFixed(2)}</span>
           )}
         </div>
 

@@ -27,7 +27,7 @@ function formatAction(action: string): string {
 function formatTimeAgo(isoString: string): string {
   const date = new Date(isoString);
   const now = new Date();
-  const seconds = Math.floor((now.getTime() - date.getTime()) / 1000);
+  const seconds = Math.max(0, Math.floor((now.getTime() - date.getTime()) / 1000));
 
   if (seconds < 60) return `${seconds}s ago`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;

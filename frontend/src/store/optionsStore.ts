@@ -75,6 +75,7 @@ interface OptionsState {
   // Symbol Selection
   activeSymbol: string;
   watchlist: string[];
+  symbolNames: Record<string, string>; // symbol -> company name
 
   // Market Data
   options: Map<string, OptionData>;
@@ -116,6 +117,7 @@ interface OptionsState {
   removeFromWatchlist: (symbol: string) => void;
   dismissRecommendation: (recId: string) => void;
   clearExpiredRecommendations: () => void;
+  setSymbolName: (symbol: string, name: string) => void;
   setScannerData: (data: HotPicks) => void;
   setScannerLoading: (loading: boolean) => void;
   setScannerError: (error: string | null) => void;
@@ -130,6 +132,10 @@ export const useOptionsStore = create<OptionsState>((set) => ({
   lastMessageTime: null,
   activeSymbol: initialWatchlist[0], // Default to first symbol
   watchlist: initialWatchlist,
+  symbolNames: {
+    QQQ: 'Invesco QQQ Trust',
+    SPY: 'SPDR S&P 500 ETF Trust',
+  },
   options: new Map(),
   underlying: null,
   abstain: null,
@@ -272,6 +278,10 @@ export const useOptionsStore = create<OptionsState>((set) => ({
       }),
     };
   }),
+
+  setSymbolName: (symbol, name) => set((state) => ({
+    symbolNames: { ...state.symbolNames, [symbol]: name },
+  })),
 
   setScannerData: (data) => set({
     scannerData: data,

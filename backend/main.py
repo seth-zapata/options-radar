@@ -1253,23 +1253,57 @@ async def search_symbols(q: str, limit: int = 20) -> dict[str, Any]:
         if MOCK_MODE:
             mock_symbols = [
                 {"symbol": "AAPL", "name": "Apple Inc."},
+                {"symbol": "AMD", "name": "Advanced Micro Devices Inc."},
                 {"symbol": "AMZN", "name": "Amazon.com Inc."},
+                {"symbol": "ARKK", "name": "ARK Innovation ETF"},
+                {"symbol": "BA", "name": "Boeing Company"},
+                {"symbol": "BABA", "name": "Alibaba Group Holding Ltd."},
+                {"symbol": "BAC", "name": "Bank of America Corporation"},
+                {"symbol": "C", "name": "Citigroup Inc."},
+                {"symbol": "CRM", "name": "Salesforce Inc."},
+                {"symbol": "DIS", "name": "Walt Disney Company"},
+                {"symbol": "F", "name": "Ford Motor Company"},
+                {"symbol": "GM", "name": "General Motors Company"},
                 {"symbol": "GOOG", "name": "Alphabet Inc."},
                 {"symbol": "GOOGL", "name": "Alphabet Inc. Class A"},
+                {"symbol": "HD", "name": "Home Depot Inc."},
+                {"symbol": "INTC", "name": "Intel Corporation"},
+                {"symbol": "IWM", "name": "iShares Russell 2000 ETF"},
+                {"symbol": "JNJ", "name": "Johnson & Johnson"},
+                {"symbol": "JPM", "name": "JPMorgan Chase & Co."},
+                {"symbol": "KO", "name": "Coca-Cola Company"},
                 {"symbol": "META", "name": "Meta Platforms Inc."},
+                {"symbol": "MCD", "name": "McDonald's Corporation"},
                 {"symbol": "MSFT", "name": "Microsoft Corporation"},
+                {"symbol": "MU", "name": "Micron Technology Inc."},
                 {"symbol": "NFLX", "name": "Netflix Inc."},
+                {"symbol": "NKE", "name": "Nike Inc."},
                 {"symbol": "NVDA", "name": "NVIDIA Corporation"},
+                {"symbol": "ORCL", "name": "Oracle Corporation"},
+                {"symbol": "PEP", "name": "PepsiCo Inc."},
+                {"symbol": "PFE", "name": "Pfizer Inc."},
                 {"symbol": "PLTR", "name": "Palantir Technologies Inc."},
+                {"symbol": "PYPL", "name": "PayPal Holdings Inc."},
                 {"symbol": "QQQ", "name": "Invesco QQQ Trust"},
+                {"symbol": "ROKU", "name": "Roku Inc."},
+                {"symbol": "SBUX", "name": "Starbucks Corporation"},
+                {"symbol": "SHOP", "name": "Shopify Inc."},
+                {"symbol": "SNAP", "name": "Snap Inc."},
+                {"symbol": "SOFI", "name": "SoFi Technologies Inc."},
                 {"symbol": "SPY", "name": "SPDR S&P 500 ETF Trust"},
+                {"symbol": "SQ", "name": "Block Inc."},
                 {"symbol": "TSLA", "name": "Tesla Inc."},
+                {"symbol": "UBER", "name": "Uber Technologies Inc."},
+                {"symbol": "V", "name": "Visa Inc."},
+                {"symbol": "WMT", "name": "Walmart Inc."},
+                {"symbol": "XOM", "name": "Exxon Mobil Corporation"},
+                {"symbol": "ZM", "name": "Zoom Video Communications Inc."},
             ]
             query_upper = q.upper()
-            results = [
-                s for s in mock_symbols
-                if s["symbol"].startswith(query_upper) or query_upper in s["name"].upper()
-            ][:limit]
+            # Prioritize symbols that start with query, then those that contain it
+            starts_with = [s for s in mock_symbols if s["symbol"].startswith(query_upper)]
+            contains = [s for s in mock_symbols if query_upper in s["name"].upper() and s not in starts_with]
+            results = (starts_with + contains)[:limit]
             return {"results": results, "count": len(results)}
 
         # Real mode: use Alpaca API

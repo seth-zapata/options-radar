@@ -24,11 +24,24 @@ export function SymbolSearch({ onSelect, onCancel }: SymbolSearchProps) {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [showResults, setShowResults] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Focus input on mount
   useEffect(() => {
     inputRef.current?.focus();
+  }, []);
+
+  // Handle clicks outside the search container
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setShowResults(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
   // Search for symbols with debouncing
@@ -46,7 +59,7 @@ export function SymbolSearch({ onSelect, onCancel }: SymbolSearchProps) {
       );
       const data = await response.json();
       setResults(data.results || []);
-      setShowResults(true);
+      setShowResults(data.results?.length > 0);
       setSelectedIndex(0);
     } catch (error) {
       console.error('Error searching symbols:', error);
@@ -85,11 +98,15 @@ export function SymbolSearch({ onSelect, onCancel }: SymbolSearchProps) {
       if (results.length > 0 && showResults) {
         onSelect(results[selectedIndex].symbol);
       } else if (query.trim()) {
-        // Allow adding arbitrary symbol if user presses enter
         onSelect(query.trim().toUpperCase());
       }
     } else if (e.key === 'Escape') {
       onCancel();
+    } else if (e.key === 'Tab' && results.length > 0 && showResults) {
+      // Tab to autocomplete with first result
+      e.preventDefault();
+      setQuery(results[0].symbol);
+      setShowResults(false);
     }
   };
 
@@ -98,7 +115,7 @@ export function SymbolSearch({ onSelect, onCancel }: SymbolSearchProps) {
   };
 
   return (
-    <div className="relative flex items-center">
+    <div ref={containerRef} className="relative flex items-center">
       <div className="relative">
         <input
           ref={inputRef}
@@ -106,10 +123,6 @@ export function SymbolSearch({ onSelect, onCancel }: SymbolSearchProps) {
           value={query}
           onChange={(e) => setQuery(e.target.value.toUpperCase())}
           onKeyDown={handleKeyDown}
-          onBlur={() => {
-            // Delay hiding to allow click on result
-            setTimeout(() => setShowResults(false), 200);
-          }}
           onFocus={() => {
             if (results.length > 0) setShowResults(true);
           }}
@@ -125,11 +138,14 @@ export function SymbolSearch({ onSelect, onCancel }: SymbolSearchProps) {
 
         {/* Search Results Dropdown */}
         {showResults && results.length > 0 && (
-          <div className="absolute top-full left-0 mt-1 w-64 bg-slate-700 rounded-md shadow-lg overflow-hidden z-50">
+          <div className="absolute top-full left-0 mt-1 w-72 bg-slate-700 rounded-md shadow-xl overflow-hidden z-[100] border border-slate-600">
             {results.map((result, index) => (
               <button
                 key={result.symbol}
-                onClick={() => handleSelect(result.symbol)}
+                onMouseDown={(e) => {
+                  e.preventDefault(); // Prevent input blur
+                  handleSelect(result.symbol);
+                }}
                 className={`w-full px-3 py-2 text-left text-sm flex justify-between items-center ${
                   index === selectedIndex
                     ? 'bg-indigo-600 text-white'
@@ -137,7 +153,9 @@ export function SymbolSearch({ onSelect, onCancel }: SymbolSearchProps) {
                 }`}
               >
                 <span className="font-bold">{result.symbol}</span>
-                <span className="text-xs text-slate-400 truncate ml-2 max-w-[140px]">
+                <span className={`text-xs truncate ml-2 max-w-[180px] ${
+                  index === selectedIndex ? 'text-indigo-200' : 'text-slate-400'
+                }`}>
                   {result.name}
                 </span>
               </button>
@@ -147,7 +165,8 @@ export function SymbolSearch({ onSelect, onCancel }: SymbolSearchProps) {
       </div>
 
       <button
-        onClick={() => {
+        onMouseDown={(e) => {
+          e.preventDefault();
           if (query.trim()) {
             onSelect(query.trim().toUpperCase());
           }
@@ -157,7 +176,10 @@ export function SymbolSearch({ onSelect, onCancel }: SymbolSearchProps) {
         +
       </button>
       <button
-        onClick={onCancel}
+        onMouseDown={(e) => {
+          e.preventDefault();
+          onCancel();
+        }}
         className="px-2 py-1 bg-slate-500 hover:bg-slate-400 text-white text-sm rounded-r"
       >
         ×
