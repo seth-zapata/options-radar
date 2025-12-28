@@ -2,19 +2,34 @@
 
 A local, display-only options trading recommendation system for a curated watchlist of tech/AI stocks.
 
-## Setup
+## Features
+
+- **Real-time Options Chain** - Live streaming quotes from Alpaca with Greeks from ORATS
+- **Gating Engine** - 11 gates (8 hard, 3 soft) that must pass before any recommendation
+- **Sentiment Integration** - News sentiment (Finnhub) + WSB social sentiment (Quiver)
+- **Daily Scanner** - Identifies opportunities based on combined sentiment signals
+- **Shadow Mode** - Tracks hypothetical positions without executing trades
+- **Abstain by Default** - Only recommends when ALL conditions are optimal
+
+## Quick Start
 
 ```bash
-# Create virtual environment
+# Clone and setup
+git clone https://github.com/seth-zapata/options-radar.git
+cd options-radar
 python3 -m venv venv
 source venv/bin/activate
-
-# Install dependencies
 pip install -e ".[dev]"
 
 # Configure credentials
 cp .env.example .env
-# Edit .env with your API keys (see Credentials section below)
+# Edit .env with your API keys (see Credentials section)
+
+# Run with mock data (no API keys needed)
+./start-mock.sh      # Terminal 1: Backend
+./start-frontend.sh  # Terminal 2: Frontend
+
+# Open http://localhost:5173
 ```
 
 ## Credentials
@@ -22,150 +37,106 @@ cp .env.example .env
 | Service | Variables | Required | Cost | Purpose |
 |---------|-----------|----------|------|---------|
 | Alpaca | `ALPACA_API_KEY`, `ALPACA_SECRET_KEY` | Yes | $99/mo (Algo Trader Plus) | Real-time option quotes |
-| ORATS | `ORATS_API_TOKEN` | Phase 2+ | $199/mo (Live) | Greeks, IV rank |
-| Finnhub | `FINNHUB_API_KEY` | Phase 6 | Free tier available | News sentiment |
-| Quiver | `QUIVER_API_KEY` | Phase 6 | $20-75/mo | Social sentiment |
+| ORATS | `ORATS_API_TOKEN` | Yes | $199/mo (Live) | Greeks, IV rank |
+| Finnhub | `FINNHUB_API_KEY` | Optional | $50/mo (Fundamental-1) | News sentiment |
+| Quiver | `QUIVER_API_KEY` | Optional | $10/mo | WSB social sentiment |
 
 **Getting credentials:**
-- Alpaca: https://app.alpaca.markets/ (enable Options + Algo Trader Plus for OPRA data)
-- ORATS: https://orats.com/ (Live subscription for real-time Greeks)
+- **Alpaca**: https://app.alpaca.markets/ (enable Options + Algo Trader Plus for OPRA data)
+- **ORATS**: https://orats.com/ (Live subscription for real-time Greeks)
+- **Finnhub**: https://finnhub.io/ (Fundamental-1 tier for news sentiment API)
+- **Quiver**: https://www.quiverquant.com/ (any paid tier for WSB data)
 
-## Testing Phase 1 (Data Foundation)
+## Testing
 
-After setup, run the Phase 1 integration test:
+### Phase 1: Data Foundation
 
 ```bash
-source venv/bin/activate
 python -m backend.test_phase1
 ```
 
-This tests:
-- Alpaca WebSocket connection and authentication
-- Real-time quote streaming for NVDA options
-- ORATS Greeks fetching (if credentials configured)
-- Data aggregation and staleness detection
+Tests Alpaca WebSocket streaming and ORATS Greeks fetching.
 
-**Expected output with Alpaca only:**
-```
-Credentials detected:
-  Alpaca: ✅ Found
-  ORATS:  ⚠️  Missing (optional)
-
-TEST: Alpaca WebSocket Connection
-  Connection state: connecting
-  Connection state: authenticating
-  Connection state: connected
-  Subscribed to 28 contracts
-  ATM strike: $140.0
-  Waiting 5 seconds for quotes...
-  Quote: NVDA 2025-01-03 140.0C Bid: $5.20 Ask: $5.40
-  ...
-  ✅ Alpaca connection: PASSED
-```
-
-## Testing Phase 2 (Gating Engine)
-
-Run the Phase 2 integration test:
+### Phase 2: Gating Engine
 
 ```bash
-source venv/bin/activate
 python -m backend.test_phase2
 ```
 
-This tests:
-- Gate framework (8 hard gates, 3 soft gates)
-- Pipeline orchestration (5 stages)
-- Abstain generation with reasons
-- Confidence capping from soft failures
-- Integration with Phase 1 data aggregator
+Tests gate framework (11 gates), pipeline orchestration, and abstain generation.
 
-**Expected output:**
-```
-TEST: Basic Gate Evaluation
-  Hard gates: 8
-  Soft gates: 3
-  Quote gate (2s): True - OK
-  Quote gate (10s): False - Quote data stale (10.0s > 5.0s)
-  ...
-  Basic gate evaluation: PASSED
-
-TEST: Pipeline - All Gates Pass
-  Pipeline passed: True
-  Stage reached: explain
-  Confidence cap: 100%
-  Pipeline pass scenario: PASSED
-
-TEST: Pipeline - Abstain on Stale Data
-  Abstain reason: STALE_DATA
-  Resume condition: Quote must update within 5s
-  Pipeline abstain scenario: PASSED
-
-Phase 2 tests completed successfully!
-```
-
-## Testing Phase 3 (MVP UI)
-
-Run the Phase 3 integration test:
+### Phase 3: MVP UI
 
 ```bash
-source venv/bin/activate
 python -m backend.test_phase3
 ```
 
-This tests:
-- FastAPI module imports
-- WebSocket manager functionality
-- REST API endpoints (/health, /api/options)
-- Data flow simulation
-- Frontend file structure
+Tests FastAPI endpoints, WebSocket manager, and React frontend structure.
 
-**Running the full system:**
+### Phase 6: Sentiment & Scanner
 
-Terminal 1 - Backend:
 ```bash
+# With live API calls (requires Finnhub + Quiver API keys)
+python -m backend.test_phase6
+
+# Mock mode (no API keys needed)
+MOCK_DATA=true python -m backend.test_phase6
+```
+
+Tests:
+- Finnhub news sentiment
+- Quiver WSB sentiment
+- Combined 50/50 weighted aggregation
+- Daily opportunity scanner
+- Alpaca portfolio integration
+- Sentiment gates (Direction, RetailMomentum, Convergence)
+
+**Expected output (live mode):**
+```
+TEST: Finnhub News Sentiment
+  Fetching news sentiment for NVDA...
+  Sentiment Score: 72.3
+  Bullish %: 86%
+  Relative Buzz: 1.24x
+
+TEST: Quiver WSB Sentiment
+  Fetching WSB sentiment for NVDA...
+  Mentions (24h): 1423
+  Sentiment Score: 40.0
+  Rank: 7
+
+TEST: Combined Sentiment Aggregator
+  Combined Score: 56.2 (50/50 weighted)
+  Signal: bullish (moderate)
+
+TEST: Daily Opportunity Scanner
+  NVDA: Score=55, Direction=bullish
+    - Moderate sentiment (56)
+    - WSB trending bullish
+```
+
+## Running the Full System
+
+**Option 1: Mock Data (UI Development)**
+```bash
+# Terminal 1
+./start-mock.sh
+
+# Terminal 2
+./start-frontend.sh
+```
+
+**Option 2: Live Data (Production)**
+```bash
+# Terminal 1
 source venv/bin/activate
 uvicorn backend.main:app --reload
+
+# Terminal 2
+./start-frontend.sh
 ```
 
-Terminal 2 - Frontend:
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Then open http://localhost:5173 in your browser.
-
-**Expected UI:**
-- Status bar with connection status and NVDA price
-- Options chain table with calls/puts, bid/ask, delta, IV
-- Abstain panel showing gate status
-- Real-time updates when market is open
-
-## Quick Demo (Quote Streaming)
-
-```bash
-source venv/bin/activate
-python -m backend.demo_stream
-```
-
-Streams real-time NVDA option quotes. Press Ctrl+C to stop.
-
-## Development
-
-```bash
-# Run unit tests
-pytest
-
-# Run with verbose output
-pytest -v
-
-# Type checking
-mypy backend
-
-# Linting
-ruff check backend
-```
+Then open http://localhost:5173
 
 ## Project Structure
 
@@ -173,12 +144,24 @@ ruff check backend
 options-radar/
 ├── backend/
 │   ├── models/          # Data models (canonical IDs, quotes, Greeks)
-│   ├── data/            # Data clients (Alpaca, ORATS, aggregator)
-│   ├── engine/          # Gating engine (Phase 2)
-│   ├── websocket/       # WebSocket management (Phase 3)
-│   └── logging/         # Shadow mode logging (Phase 5)
-├── frontend/            # React UI (Phase 3)
+│   ├── data/            # Data clients
+│   │   ├── alpaca_*.py  # Alpaca streaming + account
+│   │   ├── orats_*.py   # ORATS Greeks
+│   │   ├── finnhub_*.py # News sentiment
+│   │   ├── quiver_*.py  # WSB sentiment
+│   │   └── sentiment_aggregator.py
+│   ├── engine/          # Core logic
+│   │   ├── gates.py     # 11 trading gates
+│   │   ├── pipeline.py  # Gate orchestration
+│   │   ├── recommender.py
+│   │   ├── scanner.py   # Daily opportunity scanner
+│   │   ├── session_tracker.py
+│   │   └── position_tracker.py
+│   ├── websocket/       # WebSocket management
+│   └── logging/         # Shadow mode logging
+├── frontend/            # React UI
 ├── tests/               # Unit tests
+├── logs/                # Evaluation logs (shadow mode)
 └── docs/                # Specification
 ```
 
@@ -187,6 +170,49 @@ options-radar/
 - [x] **Phase 1: Data Foundation** - Canonical IDs, Alpaca streaming, ORATS client, aggregator
 - [x] **Phase 2: Gating Engine** - Gate framework, pipeline, abstain generation
 - [x] **Phase 3: MVP UI** - FastAPI WebSocket, React chain view
-- [ ] **Phase 4: Recommendation Logic** - Strike selection, position sizing
-- [ ] **Phase 5: Evaluation** - Shadow mode logging, metrics
-- [ ] **Phase 6: Expansion** - Sentiment, scanner, portfolio integration
+- [x] **Phase 4: Recommendation Logic** - Strike selection, position sizing, recommender
+- [x] **Phase 5: Evaluation** - Shadow mode, session tracker, position tracker, logging
+- [x] **Phase 6: Sentiment & Scanner** - Finnhub news, Quiver WSB, daily scanner
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        Frontend (React)                      │
+│  Options Chain │ Recommendations │ Abstain Panel │ Scanner  │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                        WebSocket/REST
+                              │
+┌─────────────────────────────────────────────────────────────┐
+│                     Backend (FastAPI)                        │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
+│  │   Gating    │  │ Recommender │  │  Sentiment Scanner  │  │
+│  │  Pipeline   │  │   Engine    │  │   (News + WSB)      │  │
+│  │ (11 Gates)  │  │             │  │                     │  │
+│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
+│                              │                               │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │               Data Aggregator                        │    │
+│  │  Alpaca (Quotes) + ORATS (Greeks) + Sentiment       │    │
+│  └─────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Development
+
+```bash
+# Run unit tests
+pytest
+
+# Type checking
+mypy backend
+
+# Linting
+ruff check backend
+```
+
+## Watchlist
+
+Default watchlist (configurable in backend/config.py):
+- NVDA, QQQ, AAPL, TSLA, SPY, AMD, GOOGL, AMZN, META, MSFT

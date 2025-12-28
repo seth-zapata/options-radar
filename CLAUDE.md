@@ -22,8 +22,14 @@
 This is an options trading recommendation system. Key points:
 - Display-only (no trade execution)
 - Local deployment (localhost)
-- Uses Alpaca for quotes, ORATS for Greeks
+- Data sources:
+  - Alpaca: Real-time option quotes + portfolio read-only
+  - ORATS: Greeks, IV rank
+  - Finnhub: News sentiment (catalyst/trigger)
+  - Quiver: WSB social sentiment (confirmation/overlay)
+- 11 gates (8 hard, 3 soft) that must pass before recommendation
 - "Abstain by default" philosophy - only recommend when ALL gates pass
+- Sentiment uses 50/50 weighted combination of news + WSB
 
 ## Testing After Development
 
