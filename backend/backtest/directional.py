@@ -3,10 +3,17 @@
 Tests whether WSB sentiment signals predict price direction correctly.
 Uses:
 - Free historical price data from Alpaca
-- Historical WSB sentiment data from Quiver
+- Locally collected WSB sentiment data (run sentiment_collector daily)
 
 This doesn't simulate exact options P&L, but validates if the core
 directional thesis works: "bullish sentiment -> price goes up"
+
+IMPORTANT: Historical WSB data from Quiver requires premium subscription.
+Instead, run the sentiment collector daily to build local history:
+    python -m backend.backtest.sentiment_collector
+
+Then run backtest on collected data:
+    python -m backend.run_backtest
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ from typing import Any, Literal
 from backend.config import AlpacaConfig, QuiverConfig, load_config
 from backend.data.alpaca_rest import AlpacaRestClient, BarData
 from backend.data.quiver_client import QuiverClient, WSBSentiment
+from backend.backtest.sentiment_collector import load_sentiment_history, get_storage_stats
 
 logger = logging.getLogger(__name__)
 
@@ -224,43 +232,48 @@ class DirectionalBacktest:
         start_date: str,
         end_date: str,
     ) -> list[dict[str, Any]]:
-        """Fetch historical WSB sentiment data.
+        """Fetch historical WSB sentiment data from local storage.
 
-        Note: Quiver may have limited historical data availability.
-        Falls back to generating synthetic test data if real data unavailable.
+        Historical data must be collected using the sentiment_collector:
+            python -m backend.backtest.sentiment_collector
+
+        Falls back to current sentiment if no local history available.
         """
+        # Load from local storage (built up by daily sentiment_collector runs)
+        local_history = load_sentiment_history(
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        if local_history:
+            # Convert to expected format
+            result = []
+            for record in local_history:
+                result.append({
+                    "date": record.get("date"),
+                    "sentiment": record.get("sentiment", 0),
+                    "mentions": record.get("mentions_24h", 0),
+                })
+            logger.info(f"Loaded {len(result)} local sentiment records for {symbol}")
+            return result
+
+        # No local history - try to get current sentiment as a single data point
+        logger.warning(
+            f"No local sentiment history for {symbol}. "
+            f"Run 'python -m backend.backtest.sentiment_collector' daily to build history."
+        )
+
         try:
-            # Try to fetch historical WSB data
-            # Quiver's historical endpoint: /historical/wallstreetbets/{ticker}
-            data = await self._quiver_client._request(
-                f"historical/wallstreetbets/{symbol}"
-            )
-
-            if data and isinstance(data, list):
-                # Filter to date range
-                filtered = []
-                for item in data:
-                    date = item.get("Date", "")[:10]
-                    if start_date <= date <= end_date:
-                        filtered.append({
-                            "date": date,
-                            "sentiment": float(item.get("Sentiment", 0) or 0),
-                            "mentions": int(item.get("Mentions", 0) or 0),
-                        })
-                logger.info(f"Fetched {len(filtered)} historical sentiment records for {symbol}")
-                return filtered
-
+            current = await self._quiver_client.get_wsb_sentiment(symbol)
+            if current:
+                return [{
+                    "date": datetime.now().strftime("%Y-%m-%d"),
+                    "sentiment": current.sentiment,
+                    "mentions": current.mentions_24h,
+                }]
         except Exception as e:
-            logger.warning(f"Could not fetch historical WSB data: {e}")
-
-        # Fallback: use current sentiment as a single data point
-        current = await self._quiver_client.get_wsb_sentiment(symbol)
-        if current:
-            return [{
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                "sentiment": current.sentiment,
-                "mentions": current.mentions_24h,
-            }]
+            logger.debug(f"Could not fetch current sentiment: {e}")
 
         return []
 
@@ -490,7 +503,23 @@ async def run_backtest_cli(
     if not start_date:
         start_date = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
 
-    print(f"Running directional backtest...")
+    # Check local sentiment storage
+    stats = get_storage_stats()
+    print(f"\nSentiment Data Status:")
+    if stats["records"] > 0:
+        dr = stats.get("date_range", {})
+        print(f"  Records: {stats['records']}")
+        print(f"  Date Range: {dr.get('start')} to {dr.get('end')} ({dr.get('days', 0)} days)")
+        print(f"  Symbols: {', '.join(stats.get('symbols', []))}")
+    else:
+        print("  No local sentiment history found!")
+        print("")
+        print("  To build history, run daily:")
+        print("    python -m backend.backtest.sentiment_collector")
+        print("")
+        print("  For now, will use current sentiment only (single data point).")
+
+    print(f"\nRunning directional backtest...")
     print(f"Symbols: {', '.join(symbols)}")
     print(f"Period: {start_date} to {end_date}")
     print("-" * 50)
