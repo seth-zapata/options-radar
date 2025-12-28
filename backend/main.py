@@ -488,8 +488,22 @@ async def gate_evaluation_loop() -> None:
                         valid_until=recommendation.valid_until,
                     )
 
-                    # Check session limits
-                    allowed, reason = session_tracker.can_add_recommendation(adjusted_rec)
+                    # Check session limits using confirmed position exposure only
+                    confirmed_exposure = position_tracker.get_total_exposure()
+                    max_exposure = 5000.0  # Session limit
+                    max_single_position = 1000.0  # Single position limit
+
+                    # Check if trade would exceed limits
+                    proposed_cost = adjusted_rec.total_cost
+                    if proposed_cost > max_single_position:
+                        allowed = False
+                        reason = f"Position ${proposed_cost:.0f} exceeds single position limit ${max_single_position:.0f}"
+                    elif confirmed_exposure + proposed_cost > max_exposure:
+                        allowed = False
+                        reason = f"Would exceed session limit: ${confirmed_exposure + proposed_cost:.0f} > ${max_exposure:.0f}"
+                    else:
+                        allowed = True
+                        reason = None
 
                     if allowed:
                         # Record recommendation time for rate limiting
@@ -1027,6 +1041,76 @@ async def open_position(request: OpenPositionRequest) -> dict[str, Any]:
 
     except ValueError as e:
         return {"error": str(e)}
+
+
+class ManualPositionRequest(BaseModel):
+    """Request body for opening a manual position (not from recommendation)."""
+    underlying: str
+    expiry: str
+    strike: float
+    right: str
+    action: str
+    fill_price: float
+    contracts: int = 1
+
+
+@app.post("/api/positions/manual")
+async def open_manual_position(request: ManualPositionRequest) -> dict[str, Any]:
+    """Open a position manually without a recommendation.
+
+    Args:
+        request: ManualPositionRequest with option details and fill info
+
+    Returns:
+        The created position
+    """
+    # Check exposure limit before opening
+    proposed_cost = request.fill_price * request.contracts * 100
+    current_exposure = position_tracker.get_total_exposure()
+    exposure_limit = 5000.0  # $5k session limit
+
+    if current_exposure + proposed_cost > exposure_limit:
+        remaining = exposure_limit - current_exposure
+        raise HTTPException(
+            status_code=400,
+            detail=f"Trade would exceed session limit. Current: ${current_exposure:.0f}, "
+                   f"Trade: ${proposed_cost:.0f}, Limit: ${exposure_limit:.0f}, "
+                   f"Remaining: ${remaining:.0f}"
+        )
+
+    try:
+        import uuid
+        manual_rec_id = f"manual-{str(uuid.uuid4())[:8]}"
+
+        position = position_tracker.open_position(
+            recommendation_id=manual_rec_id,
+            underlying=request.underlying,
+            expiry=request.expiry,
+            strike=request.strike,
+            right=request.right,
+            action=request.action,
+            contracts=request.contracts,
+            fill_price=request.fill_price,
+        )
+
+        # Broadcast position update to all clients
+        await connection_manager.broadcast({
+            "type": "position_opened",
+            "data": position_to_dict(position),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+        # Also broadcast updated session stats
+        await connection_manager.broadcast({
+            "type": "session_status",
+            "data": session_stats_to_dict(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+        return {"position": position_to_dict(position)}
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 class ClosePositionRequest(BaseModel):

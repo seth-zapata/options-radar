@@ -224,7 +224,7 @@ export function StatusBar() {
       </div>
 
       {/* Symbol Tabs */}
-      <div className="bg-slate-700 px-4 py-1 flex items-center gap-1 overflow-x-auto">
+      <div className="bg-slate-700 px-4 py-1 flex items-center gap-1 overflow-x-auto overflow-y-visible" style={{ position: 'relative' }}>
         {watchlist.map((symbol) => {
           const isActive = symbol === activeSymbol;
           const isCore = CORE_SYMBOLS.includes(symbol);

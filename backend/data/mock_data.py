@@ -20,15 +20,51 @@ from backend.models.market_data import UnderlyingData
 
 logger = logging.getLogger(__name__)
 
-# Realistic NVDA price range
-BASE_PRICE = 137.50
+# Base prices by symbol (realistic ranges)
+BASE_PRICES = {
+    "QQQ": 525.00,
+    "SPY": 595.00,
+    "NVDA": 137.50,
+    "AAPL": 255.00,
+    "TSLA": 425.00,
+    "MSFT": 435.00,
+    "AMZN": 225.00,
+    "META": 610.00,
+    "GOOGL": 195.00,
+    "AMD": 125.00,
+}
+DEFAULT_PRICE = 200.00  # For unknown symbols
 PRICE_VOLATILITY = 0.002  # 0.2% per update
 
 # Option chain configuration
 # Weekly options for near-term, then monthly, then quarterly for LEAPS
 EXPIRATIONS_WEEKS = [1, 2, 3, 4, 6, 8, 12, 16, 26, 39, 52, 78, 104]  # Weeks out (up to 2 years)
-STRIKES_AROUND_ATM = 10  # Strikes above and below ATM
-STRIKE_INCREMENT = 2.50  # $2.50 strike increments
+
+# Strikes configuration - fewer strikes for longer DTEs (realistic)
+def get_strikes_around_atm(weeks_out: int) -> int:
+    """Get number of strikes around ATM based on DTE.
+    Near-term has more strikes, LEAPS have fewer.
+    """
+    if weeks_out <= 4:
+        return 15  # Weekly/near-term: more strikes
+    elif weeks_out <= 12:
+        return 10  # 1-3 months: moderate strikes
+    elif weeks_out <= 26:
+        return 7   # 3-6 months: fewer strikes
+    elif weeks_out <= 52:
+        return 5   # 6-12 months: even fewer
+    else:
+        return 3   # LEAPS: minimal strikes
+
+# Strike increments vary by price
+def get_strike_increment(price: float) -> float:
+    """Get strike increment based on underlying price."""
+    if price >= 500:
+        return 5.0  # $5 increments for high-priced
+    elif price >= 200:
+        return 2.50  # $2.50 increments for mid-priced
+    else:
+        return 1.0  # $1 increments for lower-priced
 
 
 @dataclass
@@ -112,14 +148,22 @@ def generate_expiration_dates() -> list[str]:
     return expirations
 
 
-def generate_strikes(atm_price: float) -> list[float]:
-    """Generate strikes around ATM price."""
+def generate_strikes(atm_price: float, weeks_out: int = 4) -> list[float]:
+    """Generate strikes around ATM price.
+
+    Args:
+        atm_price: Current underlying price
+        weeks_out: Weeks until expiration (affects number of strikes)
+    """
+    increment = get_strike_increment(atm_price)
+    num_strikes = get_strikes_around_atm(weeks_out)
+
     # Round ATM to nearest strike increment
-    atm_strike = round(atm_price / STRIKE_INCREMENT) * STRIKE_INCREMENT
+    atm_strike = round(atm_price / increment) * increment
 
     strikes = []
-    for i in range(-STRIKES_AROUND_ATM, STRIKES_AROUND_ATM + 1):
-        strike = atm_strike + (i * STRIKE_INCREMENT)
+    for i in range(-num_strikes, num_strikes + 1):
+        strike = atm_strike + (i * increment)
         if strike > 0:
             strikes.append(strike)
 
@@ -127,6 +171,7 @@ def generate_strikes(atm_price: float) -> list[float]:
 
 
 def create_mock_option(
+    underlying_symbol: str,
     underlying_price: float,
     strike: float,
     expiry: str,
@@ -171,7 +216,7 @@ def create_mock_option(
     vega = round(underlying_price * 0.01 * math.sqrt(time_to_exp) * math.exp(-moneyness * 5), 4)
 
     canonical_id = CanonicalOptionId(
-        underlying="NVDA",
+        underlying=underlying_symbol,
         expiry=expiry,
         right=right,
         strike=strike,
@@ -207,6 +252,7 @@ class MockDataGenerator:
 
     def __init__(
         self,
+        symbol: str = "QQQ",
         on_option_update: Callable[[AggregatedOptionData], None] | None = None,
         on_underlying_update: Callable[[UnderlyingData], None] | None = None,
         update_interval: float = 1.0,
@@ -215,10 +261,24 @@ class MockDataGenerator:
         self.on_underlying_update = on_underlying_update
         self.update_interval = update_interval
 
-        self._underlying_price = BASE_PRICE
+        self._symbol = symbol
+        self._underlying_price = BASE_PRICES.get(symbol, DEFAULT_PRICE)
         self._options: dict[str, MockOptionState] = {}
         self._running = False
         self._task: asyncio.Task | None = None
+
+    @property
+    def symbol(self) -> str:
+        return self._symbol
+
+    def set_symbol(self, symbol: str) -> None:
+        """Switch to a different symbol, regenerating the chain."""
+        if symbol != self._symbol:
+            self._symbol = symbol
+            self._underlying_price = BASE_PRICES.get(symbol, DEFAULT_PRICE)
+            self._options.clear()
+            # Generate new chain for this symbol
+            self.generate_initial_chain()
 
     @property
     def underlying_price(self) -> float:
@@ -235,23 +295,27 @@ class MockDataGenerator:
         # Create underlying data (timestamp must be ISO string for age_seconds())
         # IV rank < 50 is favorable for buying premium (passes iv_rank_appropriate gate)
         underlying = UnderlyingData(
-            symbol="NVDA",
+            symbol=self._symbol,
             price=self._underlying_price,
             iv_rank=random.uniform(30, 45),  # Keep in favorable range for BUY actions
             iv_percentile=random.uniform(30, 50),
             timestamp=now.isoformat(),
         )
 
-        # Generate options
+        # Generate options with different strike counts per expiration
         expirations = generate_expiration_dates()
-        strikes = generate_strikes(self._underlying_price)
 
         options = []
-        for expiry in expirations:
+        total_strikes = 0
+        for idx, expiry in enumerate(expirations):
+            weeks_out = EXPIRATIONS_WEEKS[idx] if idx < len(EXPIRATIONS_WEEKS) else 52
+            strikes = generate_strikes(self._underlying_price, weeks_out)
+            total_strikes += len(strikes)
+
             for strike in strikes:
                 for right in ["C", "P"]:
                     option = create_mock_option(
-                        self._underlying_price, strike, expiry, right, now
+                        self._symbol, self._underlying_price, strike, expiry, right, now
                     )
                     options.append(option)
 
@@ -264,8 +328,8 @@ class MockDataGenerator:
                     )
 
         logger.info(
-            f"Generated mock chain: {len(options)} options, "
-            f"{len(expirations)} expirations, {len(strikes)} strikes"
+            f"Generated mock chain for {self._symbol}: {len(options)} options, "
+            f"{len(expirations)} expirations, avg {total_strikes // len(expirations)} strikes/exp"
         )
 
         return underlying, options
@@ -355,7 +419,7 @@ class MockDataGenerator:
 
                 if self.on_underlying_update:
                     underlying = UnderlyingData(
-                        symbol="NVDA",
+                        symbol=self._symbol,
                         price=self._underlying_price,
                         iv_rank=random.uniform(30, 45),  # Keep in favorable range
                         iv_percentile=random.uniform(30, 50),
@@ -367,8 +431,9 @@ class MockDataGenerator:
                 # Always include ATM options to keep them fresh for gate evaluation
                 keys = list(self._options.keys())
 
-                # Find ATM strike
-                atm_strike = round(self._underlying_price / 2.5) * 2.5
+                # Find ATM strike using the correct increment for this symbol
+                increment = get_strike_increment(self._underlying_price)
+                atm_strike = round(self._underlying_price / increment) * increment
                 atm_keys = [k for k in keys if f"-{atm_strike}-" in k]
 
                 # Random subset plus ATM options
@@ -406,7 +471,7 @@ class MockDataGenerator:
     def get_underlying(self) -> UnderlyingData:
         """Get current underlying data."""
         return UnderlyingData(
-            symbol="NVDA",
+            symbol=self._symbol,
             price=self._underlying_price,
             iv_rank=40.0,  # Favorable for buying premium
             iv_percentile=45.0,

@@ -115,8 +115,8 @@ export function SymbolSearch({ onSelect, onCancel }: SymbolSearchProps) {
   };
 
   return (
-    <div ref={containerRef} className="relative flex items-center">
-      <div className="relative">
+    <div ref={containerRef} className="relative flex items-center" style={{ zIndex: 9999 }}>
+      <div className="relative" style={{ position: 'static' }}>
         <input
           ref={inputRef}
           type="text"
@@ -136,9 +136,15 @@ export function SymbolSearch({ onSelect, onCancel }: SymbolSearchProps) {
           </span>
         )}
 
-        {/* Search Results Dropdown */}
+        {/* Search Results Dropdown - uses fixed position to escape overflow clips */}
         {showResults && results.length > 0 && (
-          <div className="absolute top-full left-0 mt-1 w-72 bg-slate-700 rounded-md shadow-xl overflow-hidden z-[100] border border-slate-600">
+          <div
+            className="fixed mt-1 w-72 bg-slate-700 rounded-md shadow-xl overflow-hidden border border-slate-600"
+            style={{
+              top: (inputRef.current?.getBoundingClientRect().bottom ?? 0) + 4,
+              left: inputRef.current?.getBoundingClientRect().left ?? 0,
+              zIndex: 99999,
+            }}>
             {results.map((result, index) => (
               <button
                 key={result.symbol}
