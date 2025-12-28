@@ -2,7 +2,7 @@
  * WebSocket hook for real-time options data streaming.
  */
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useCallback } from 'react';
 import { useOptionsStore, EvaluatedOption } from '../store/optionsStore';
 import type { OptionData, UnderlyingData, WebSocketMessage, GateResult, AbstainData, Recommendation, SessionStatus, TrackedPosition, ExitSignal } from '../types';
 
@@ -20,8 +20,9 @@ export function useOptionsStream() {
   const pingIntervalRef = useRef<number | null>(null);
   const disconnectGraceRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
+  const currentSymbolRef = useRef<string | null>(null);
 
-  // Get store methods once (they're stable)
+  // Get store methods and state
   const setConnectionStatus = useOptionsStore((state) => state.setConnectionStatus);
   const updateOption = useOptionsStore((state) => state.updateOption);
   const updateUnderlying = useOptionsStore((state) => state.updateUnderlying);
@@ -32,6 +33,18 @@ export function useOptionsStream() {
   const addPosition = useOptionsStore((state) => state.addPosition);
   const updatePosition = useOptionsStore((state) => state.updatePosition);
   const addExitSignal = useOptionsStore((state) => state.addExitSignal);
+  const activeSymbol = useOptionsStore((state) => state.activeSymbol);
+
+  // Send subscribe message to switch symbols
+  const sendSubscribe = useCallback((symbol: string) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'subscribe',
+        symbol: symbol
+      }));
+      currentSymbolRef.current = symbol;
+    }
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -193,6 +206,11 @@ export function useOptionsStream() {
                 console.error('Server error:', message.data);
                 break;
 
+              case 'symbol_changed':
+                // Server confirmed symbol switch
+                console.log('Symbol changed to:', (message.data as { symbol: string }).symbol);
+                break;
+
               default:
                 // Ignore unknown message types silently
                 break;
@@ -215,4 +233,18 @@ export function useOptionsStream() {
       setConnectionStatus('disconnected');
     };
   }, [setConnectionStatus, updateOption, updateUnderlying, setAbstain, setGateResults, addRecommendation, setSessionStatus, addPosition, updatePosition, addExitSignal]);
+
+  // Handle symbol changes - send subscribe message to backend
+  useEffect(() => {
+    // Skip if same symbol or not connected yet
+    if (currentSymbolRef.current === activeSymbol) return;
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      // Store for when we connect
+      currentSymbolRef.current = activeSymbol;
+      return;
+    }
+
+    // Send subscribe message to switch symbols
+    sendSubscribe(activeSymbol);
+  }, [activeSymbol, sendSubscribe]);
 }

@@ -152,31 +152,67 @@ export function ScannerPanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<string | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
 
-  const fetchHotPicks = useCallback(async () => {
+  const fetchHotPicks = useCallback(async (isRetry = false) => {
+    const maxRetries = 2;
+    const timeout = 15000; // 15 second timeout
+
     try {
       setLoading(true);
-      setError(null);
+      if (!isRetry) {
+        setError(null);
+        setRetryCount(0);
+      }
 
-      const response = await fetch(`${API_BASE}/api/scanner/hot-picks`);
+      // Create abort controller for timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+      const response = await fetch(`${API_BASE}/api/scanner/hot-picks`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
       if (!response.ok) throw new Error('Failed to fetch');
 
       const data = await response.json();
+
+      // Check if there was an error in the response
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
       setHotPicks(data);
       setLastUpdate(new Date().toLocaleTimeString());
+      setRetryCount(0);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load');
+      const errorMessage = err instanceof Error
+        ? (err.name === 'AbortError' ? 'Request timed out' : err.message)
+        : 'Failed to load';
+
+      // Auto-retry on timeout or network error
+      if (retryCount < maxRetries && (err instanceof Error && (err.name === 'AbortError' || err.message.includes('fetch')))) {
+        setRetryCount(prev => prev + 1);
+        setError(`${errorMessage} - Retrying... (${retryCount + 1}/${maxRetries})`);
+        // Exponential backoff: 2s, 4s
+        setTimeout(() => fetchHotPicks(true), 2000 * Math.pow(2, retryCount));
+        return;
+      }
+
+      setError(errorMessage);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [retryCount]);
 
   // Fetch on mount and every 5 minutes
   useEffect(() => {
-    fetchHotPicks();
-    const interval = setInterval(fetchHotPicks, 300000);
+    fetchHotPicks(false);
+    const interval = setInterval(() => fetchHotPicks(false), 300000);
     return () => clearInterval(interval);
-  }, [fetchHotPicks]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Only run on mount
 
   return (
     <div className="bg-white rounded-lg shadow overflow-hidden">
@@ -188,7 +224,7 @@ export function ScannerPanel() {
           </p>
         </div>
         <button
-          onClick={fetchHotPicks}
+          onClick={() => fetchHotPicks(false)}
           disabled={loading}
           className="px-3 py-1 bg-purple-500 hover:bg-purple-400 rounded text-sm disabled:opacity-50"
         >

@@ -1418,6 +1418,32 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 # Handle client messages
                 if data == "ping":
                     await websocket.send_text("pong")
+                elif data.startswith("{"):
+                    # Parse JSON message
+                    try:
+                        msg = json.loads(data)
+                        msg_type = msg.get("type")
+
+                        if msg_type == "subscribe":
+                            new_symbol = msg.get("symbol", "").upper()
+                            if new_symbol and subscription_manager:
+                                logger.info(f"Client requesting symbol switch to {new_symbol}")
+                                # Switch symbol (unsubscribe old, subscribe new)
+                                await subscription_manager.switch_symbol(new_symbol)
+                                # Clear old data from aggregator
+                                if aggregator:
+                                    aggregator.clear()
+                                # Send confirmation
+                                await connection_manager._send_to_client(
+                                    websocket,
+                                    {
+                                        "type": "symbol_changed",
+                                        "data": {"symbol": new_symbol},
+                                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    }
+                                )
+                    except json.JSONDecodeError:
+                        logger.warning(f"Invalid JSON from client: {data}")
                 else:
                     logger.debug(f"Received from client: {data}")
             except asyncio.TimeoutError:

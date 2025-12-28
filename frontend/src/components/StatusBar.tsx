@@ -3,10 +3,7 @@
  */
 
 import { useEffect, useState, useCallback } from 'react';
-import { useOptionsStore } from '../store/optionsStore';
-
-// Watchlist - for now only NVDA is active, others are for display
-const WATCHLIST = ['NVDA', 'AAPL', 'TSLA', 'AMD', 'QQQ', 'SPY'];
+import { useOptionsStore, WATCHLIST } from '../store/optionsStore';
 
 interface MarketInfo {
   isOpen: boolean;
@@ -35,11 +32,10 @@ function formatDuration(totalSeconds: number): string {
 }
 
 export function StatusBar() {
-  const { connectionStatus, underlying, lastMessageTime, options } = useOptionsStore();
+  const { connectionStatus, underlying, lastMessageTime, options, activeSymbol, setActiveSymbol } = useOptionsStore();
   const [marketInfo, setMarketInfo] = useState<MarketInfo | null>(null);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [lastFetchTime, setLastFetchTime] = useState<number>(0);
-  const [activeSymbol, setActiveSymbol] = useState('NVDA');
 
   // Fetch market status from API
   const fetchMarketStatus = useCallback(async () => {
@@ -187,28 +183,21 @@ export function StatusBar() {
       <div className="bg-slate-700 px-4 py-1 flex items-center gap-1 overflow-x-auto">
         {WATCHLIST.map((symbol) => {
           const isActive = symbol === activeSymbol;
-          const isAvailable = symbol === 'NVDA'; // Only NVDA is active for now
 
           return (
             <button
               key={symbol}
-              onClick={() => isAvailable && setActiveSymbol(symbol)}
-              disabled={!isAvailable}
+              onClick={() => setActiveSymbol(symbol)}
               className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
                 isActive
                   ? 'bg-indigo-600 text-white'
-                  : isAvailable
-                    ? 'bg-slate-600 text-slate-200 hover:bg-slate-500'
-                    : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                  : 'bg-slate-600 text-slate-200 hover:bg-slate-500'
               }`}
-              title={isAvailable ? undefined : 'Coming soon'}
             >
               {symbol}
-              {!isAvailable && <span className="ml-1 text-xs opacity-50">*</span>}
             </button>
           );
         })}
-        <span className="text-xs text-slate-500 ml-2">* Coming soon</span>
       </div>
     </div>
   );

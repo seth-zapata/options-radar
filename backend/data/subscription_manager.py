@@ -154,6 +154,39 @@ class SubscriptionManager:
             await self._http_client.aclose()
             self._http_client = None
 
+    async def switch_symbol(self, new_symbol: str) -> None:
+        """Switch to a new underlying symbol.
+
+        Unsubscribes from current options and subscribes to new symbol's options.
+
+        Args:
+            new_symbol: The new underlying symbol to track
+        """
+        if new_symbol == self.symbol:
+            return
+
+        logger.info(f"Switching from {self.symbol} to {new_symbol}")
+
+        # Unsubscribe from all current symbols
+        if self._current_symbols and self.client.is_connected:
+            try:
+                await self.client.unsubscribe(list(self._current_symbols))
+            except Exception as e:
+                logger.error(f"Failed to unsubscribe during symbol switch: {e}")
+
+        # Reset state
+        self._current_symbols = set()
+        self._current_atm = None
+        self.symbol = new_symbol
+
+        # Fetch new symbol price and subscribe
+        price = await self._fetch_underlying_price()
+        if price is not None:
+            await self.update_underlying_price(price)
+            logger.info(f"Switched to {new_symbol}, subscribed to {len(self._current_symbols)} contracts")
+        else:
+            logger.warning(f"Could not fetch initial price for {new_symbol}")
+
     async def _fetch_underlying_price(self) -> float | None:
         """Fetch current underlying price from Alpaca REST API."""
         if not self._http_client:

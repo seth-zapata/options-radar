@@ -13,10 +13,16 @@ export interface EvaluatedOption {
   premium: number | null;
 }
 
+// Default watchlist - can be extended
+export const WATCHLIST = ['NVDA', 'AAPL', 'TSLA', 'AMD', 'QQQ', 'SPY'];
+
 interface OptionsState {
   // Connection
   connectionStatus: ConnectionStatus;
   lastMessageTime: number | null;
+
+  // Symbol Selection
+  activeSymbol: string;
 
   // Market Data
   options: Map<string, OptionData>;
@@ -47,6 +53,7 @@ interface OptionsState {
   updatePosition: (position: TrackedPosition) => void;
   addExitSignal: (signal: ExitSignal) => void;
   clearExitSignal: (positionId: string) => void;
+  setActiveSymbol: (symbol: string) => void;
   clearAll: () => void;
 }
 
@@ -54,6 +61,7 @@ export const useOptionsStore = create<OptionsState>((set) => ({
   // Initial state
   connectionStatus: 'disconnected',
   lastMessageTime: null,
+  activeSymbol: WATCHLIST[0], // Default to first symbol (NVDA)
   options: new Map(),
   underlying: null,
   abstain: null,
@@ -121,6 +129,16 @@ export const useOptionsStore = create<OptionsState>((set) => ({
   clearExitSignal: (positionId) => set((state) => ({
     exitSignals: state.exitSignals.filter((s) => s.positionId !== positionId),
   })),
+
+  setActiveSymbol: (symbol) => set({
+    activeSymbol: symbol,
+    // Clear options data when switching symbols
+    options: new Map(),
+    underlying: null,
+    abstain: null,
+    gateResults: [],
+    evaluatedOption: null,
+  }),
 
   clearAll: () => set({
     options: new Map(),

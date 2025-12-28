@@ -561,6 +561,8 @@ class QuiverClient:
 
             if data_24h and isinstance(data_24h, list) and len(data_24h) > 0:
                 for item in data_24h:
+                    if not item or not isinstance(item, dict):
+                        continue
                     if item.get("Ticker", "").upper() == symbol.upper():
                         mentions_24h = int(item.get("Count", 0) or 0)
                         sentiment = float(item.get("Sentiment", 0) or 0)
@@ -570,6 +572,8 @@ class QuiverClient:
             rank = 999
             if data_hot and isinstance(data_hot, list):
                 for i, item in enumerate(data_hot):
+                    if not item or not isinstance(item, dict):
+                        continue
                     if item.get("Ticker", "").upper() == symbol.upper():
                         rank = i + 1
                         # Use sentiment from hottest if we didn't get it above
@@ -627,6 +631,8 @@ class QuiverClient:
             results = []
 
             for i, item in enumerate(data[:limit]):
+                if not item or not isinstance(item, dict):
+                    continue
                 ticker = item.get("Ticker", "")
                 if not ticker:
                     continue
