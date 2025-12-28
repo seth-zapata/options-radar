@@ -504,17 +504,25 @@ class GatingPipeline:
 
     def _build_resume_condition(self, failed_gate: GateResult) -> str:
         """Build human-readable resume condition."""
+        # Helper to format values safely (handles str, float, int, None)
+        def fmt(val, decimals=None):
+            if val is None:
+                return "N/A"
+            if isinstance(val, (int, float)) and decimals is not None:
+                return f"{val:.{decimals}f}"
+            return str(val)
+
         gate_to_condition = {
             "underlying_price_fresh": "Underlying price must update within 2s",
             "quote_fresh": "Quote must update within 5s",
             "greeks_fresh": "Greeks must update within 90s",
-            "spread_acceptable": f"Spread must narrow to < 10% (currently {failed_gate.value}%)"
+            "spread_acceptable": f"Spread must narrow to < 10% (currently {fmt(failed_gate.value)}%)"
             if failed_gate.value else "Spread must narrow to < 10%",
-            "open_interest_sufficient": f"OI must reach 100 (currently {failed_gate.value})"
+            "open_interest_sufficient": f"OI must reach 100 (currently {fmt(failed_gate.value)})"
             if failed_gate.value else "OI must reach 100",
-            "volume_sufficient": f"Volume must reach 50 (currently {failed_gate.value})"
+            "volume_sufficient": f"Volume must reach 50 (currently {fmt(failed_gate.value)})"
             if failed_gate.value else "Volume must reach 50",
-            "delta_in_range": f"Delta must be 0.10-0.80 (currently {failed_gate.value:.2f})"
+            "delta_in_range": f"Delta must be 0.10-0.80 (currently {fmt(failed_gate.value, 2)})"
             if failed_gate.value else "Delta must be 0.10-0.80",
             "iv_rank_appropriate": "IV rank must align with action",
             "cash_available": "Increase cash or reduce position size",
@@ -523,7 +531,7 @@ class GatingPipeline:
             # Signal quality gates
             "signal_enabled": "Signals disabled for this symbol (low backtest accuracy)",
             "sentiment_alignment": "News and WSB sentiment must agree on direction",
-            "minimum_mentions": f"WSB mentions must reach 5 (currently {failed_gate.value})"
+            "minimum_mentions": f"WSB mentions must reach 5 (currently {fmt(failed_gate.value)})"
             if failed_gate.value is not None else "Need more WSB attention (5+ mentions)",
         }
 
