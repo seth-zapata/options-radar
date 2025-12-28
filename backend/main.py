@@ -1473,13 +1473,14 @@ async def get_metrics_dashboard() -> dict[str, Any]:
         })
 
     # Position P/L summary from position tracker
-    open_positions = position_tracker.get_open_positions()
-    closed_positions = position_tracker.get_closed_positions()
+    all_positions = position_tracker.get_all_positions()
+    open_positions = [p for p in all_positions if p.status != "closed"]
+    closed_positions = [p for p in all_positions if p.status == "closed"]
 
-    total_open_pnl = sum(p.unrealized_pnl or 0 for p in open_positions)
-    total_closed_pnl = sum(p.realized_pnl or 0 for p in closed_positions)
-    win_trades = [p for p in closed_positions if p.realized_pnl and p.realized_pnl > 0]
-    lose_trades = [p for p in closed_positions if p.realized_pnl and p.realized_pnl < 0]
+    total_open_pnl = sum(p.pnl for p in open_positions)
+    total_closed_pnl = sum(p.pnl for p in closed_positions)
+    win_trades = [p for p in closed_positions if p.pnl > 0]
+    lose_trades = [p for p in closed_positions if p.pnl < 0]
 
     position_summary = {
         "openPositions": len(open_positions),
