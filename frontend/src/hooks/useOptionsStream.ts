@@ -4,7 +4,7 @@
 
 import { useEffect, useRef } from 'react';
 import { useOptionsStore, EvaluatedOption } from '../store/optionsStore';
-import type { OptionData, UnderlyingData, WebSocketMessage, GateResult, AbstainData, Recommendation, SessionStatus } from '../types';
+import type { OptionData, UnderlyingData, WebSocketMessage, GateResult, AbstainData, Recommendation, SessionStatus, TrackedPosition, ExitSignal } from '../types';
 
 const WS_URL = import.meta.env.PROD
   ? `wss://${window.location.host}/ws`
@@ -29,6 +29,9 @@ export function useOptionsStream() {
   const setGateResults = useOptionsStore((state) => state.setGateResults);
   const addRecommendation = useOptionsStore((state) => state.addRecommendation);
   const setSessionStatus = useOptionsStore((state) => state.setSessionStatus);
+  const addPosition = useOptionsStore((state) => state.addPosition);
+  const updatePosition = useOptionsStore((state) => state.updatePosition);
+  const addExitSignal = useOptionsStore((state) => state.addExitSignal);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -163,6 +166,18 @@ export function useOptionsStream() {
                 setSessionStatus(message.data as SessionStatus);
                 break;
 
+              case 'position_opened':
+                addPosition(message.data as TrackedPosition);
+                break;
+
+              case 'position_closed':
+                updatePosition(message.data as TrackedPosition);
+                break;
+
+              case 'exit_signal':
+                addExitSignal(message.data as ExitSignal);
+                break;
+
               case 'connection_status':
                 // Server confirmed connection
                 break;
@@ -199,5 +214,5 @@ export function useOptionsStream() {
       cleanup();
       setConnectionStatus('disconnected');
     };
-  }, [setConnectionStatus, updateOption, updateUnderlying, setAbstain, setGateResults, addRecommendation, setSessionStatus]);
+  }, [setConnectionStatus, updateOption, updateUnderlying, setAbstain, setGateResults, addRecommendation, setSessionStatus, addPosition, updatePosition, addExitSignal]);
 }

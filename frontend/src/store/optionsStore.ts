@@ -3,7 +3,7 @@
  */
 
 import { create } from 'zustand';
-import type { OptionData, UnderlyingData, AbstainData, ConnectionStatus, GateResult, Recommendation, SessionStatus } from '../types';
+import type { OptionData, UnderlyingData, AbstainData, ConnectionStatus, GateResult, Recommendation, SessionStatus, TrackedPosition, ExitSignal } from '../types';
 import { optionKey } from '../types';
 
 export interface EvaluatedOption {
@@ -31,6 +31,10 @@ interface OptionsState {
   recommendations: Recommendation[];
   sessionStatus: SessionStatus | null;
 
+  // Positions
+  positions: TrackedPosition[];
+  exitSignals: ExitSignal[];
+
   // Actions
   setConnectionStatus: (status: ConnectionStatus) => void;
   updateOption: (option: OptionData) => void;
@@ -39,6 +43,10 @@ interface OptionsState {
   setGateResults: (results: GateResult[], evaluatedOption?: EvaluatedOption) => void;
   addRecommendation: (rec: Recommendation) => void;
   setSessionStatus: (status: SessionStatus) => void;
+  addPosition: (position: TrackedPosition) => void;
+  updatePosition: (position: TrackedPosition) => void;
+  addExitSignal: (signal: ExitSignal) => void;
+  clearExitSignal: (positionId: string) => void;
   clearAll: () => void;
 }
 
@@ -53,6 +61,8 @@ export const useOptionsStore = create<OptionsState>((set) => ({
   evaluatedOption: null,
   recommendations: [],
   sessionStatus: null,
+  positions: [],
+  exitSignals: [],
 
   // Actions
   setConnectionStatus: (status) => set({ connectionStatus: status }),
@@ -90,6 +100,28 @@ export const useOptionsStore = create<OptionsState>((set) => ({
 
   setSessionStatus: (status) => set({ sessionStatus: status }),
 
+  addPosition: (position) => set((state) => {
+    const exists = state.positions.some((p) => p.id === position.id);
+    if (exists) return state;
+    return { positions: [position, ...state.positions] };
+  }),
+
+  updatePosition: (position) => set((state) => ({
+    positions: state.positions.map((p) =>
+      p.id === position.id ? position : p
+    ),
+  })),
+
+  addExitSignal: (signal) => set((state) => {
+    const exists = state.exitSignals.some((s) => s.positionId === signal.positionId);
+    if (exists) return state;
+    return { exitSignals: [...state.exitSignals, signal] };
+  }),
+
+  clearExitSignal: (positionId) => set((state) => ({
+    exitSignals: state.exitSignals.filter((s) => s.positionId !== positionId),
+  })),
+
   clearAll: () => set({
     options: new Map(),
     underlying: null,
@@ -98,6 +130,8 @@ export const useOptionsStore = create<OptionsState>((set) => ({
     evaluatedOption: null,
     recommendations: [],
     sessionStatus: null,
+    positions: [],
+    exitSignals: [],
   }),
 }));
 

@@ -7,6 +7,8 @@ import { useState } from 'react';
 import { useOptionsStore } from '../store/optionsStore';
 import type { Recommendation, RecommendationGateResult } from '../types';
 
+const API_BASE = 'http://localhost:8000';
+
 function formatAction(action: string): string {
   switch (action) {
     case 'BUY_CALL':
@@ -52,9 +54,147 @@ function GateResultRow({ gate }: { gate: RecommendationGateResult }) {
   );
 }
 
-function RecommendationCard({ rec, isLatest }: { rec: Recommendation; isLatest: boolean }) {
+interface FillPriceModalProps {
+  rec: Recommendation;
+  onClose: () => void;
+  onConfirm: (fillPrice: number, contracts: number) => void;
+}
+
+function FillPriceModal({ rec, onClose, onConfirm }: FillPriceModalProps) {
+  const [fillPrice, setFillPrice] = useState(rec.premium.toFixed(2));
+  const [contracts, setContracts] = useState(rec.contracts.toString());
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const price = parseFloat(fillPrice);
+    const qty = parseInt(contracts, 10);
+
+    if (isNaN(price) || price <= 0) {
+      setError('Please enter a valid fill price');
+      return;
+    }
+    if (isNaN(qty) || qty <= 0) {
+      setError('Please enter a valid number of contracts');
+      return;
+    }
+
+    onConfirm(price, qty);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4">
+        <div className="px-4 py-3 border-b">
+          <h3 className="font-bold text-lg">Confirm Trade</h3>
+          <p className="text-sm text-slate-500">
+            {formatAction(rec.action)} {rec.underlying} ${rec.strike} {rec.right === 'C' ? 'Call' : 'Put'}
+          </p>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-4">
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">
+                Fill Price (per contract)
+              </label>
+              <div className="relative">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500">$</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={fillPrice}
+                  onChange={(e) => setFillPrice(e.target.value)}
+                  className="w-full pl-8 pr-3 py-2 border rounded-md focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                  placeholder={rec.premium.toFixed(2)}
+                  autoFocus
+                />
+              </div>
+              <p className="text-xs text-slate-500 mt-1">
+                Displayed: ${rec.premium.toFixed(2)} (adjust to actual fill)
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">
+                Contracts
+              </label>
+              <input
+                type="number"
+                min="1"
+                value={contracts}
+                onChange={(e) => setContracts(e.target.value)}
+                className="w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+              />
+            </div>
+
+            <div className="bg-slate-50 rounded p-3">
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-600">Total Cost</span>
+                <span className="font-bold">
+                  ${((parseFloat(fillPrice) || 0) * (parseInt(contracts, 10) || 0) * 100).toFixed(0)}
+                </span>
+              </div>
+            </div>
+
+            {error && (
+              <p className="text-sm text-red-600">{error}</p>
+            )}
+          </div>
+
+          <div className="flex gap-3 mt-6">
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex-1 px-4 py-2 border border-slate-300 rounded-md text-slate-700 hover:bg-slate-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700"
+            >
+              Confirm Trade
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function RecommendationCard({ rec, isLatest, isConfirmed }: { rec: Recommendation; isLatest: boolean; isConfirmed: boolean }) {
   const [showGates, setShowGates] = useState(false);
+  const [showFillModal, setShowFillModal] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const expired = isExpired(rec.validUntil);
+
+  const handleConfirmTrade = async (fillPrice: number, contracts: number) => {
+    setConfirming(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/positions/open`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          recommendation_id: rec.id,
+          fill_price: fillPrice,
+          contracts: contracts,
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || 'Failed to confirm trade');
+      }
+
+      setShowFillModal(false);
+    } catch (error) {
+      console.error('Error confirming trade:', error);
+      alert(error instanceof Error ? error.message : 'Failed to confirm trade');
+    } finally {
+      setConfirming(false);
+    }
+  };
 
   const actionColors: Record<string, string> = {
     BUY_CALL: 'bg-green-500 text-white',
@@ -141,7 +281,33 @@ function RecommendationCard({ rec, isLatest }: { rec: Recommendation; isLatest: 
             ))}
           </div>
         )}
+
+        {/* Take Trade Button */}
+        {!expired && !isConfirmed && (
+          <button
+            onClick={() => setShowFillModal(true)}
+            disabled={confirming}
+            className="w-full mt-3 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 disabled:opacity-50 font-medium text-sm"
+          >
+            {confirming ? 'Confirming...' : 'I took this trade'}
+          </button>
+        )}
+
+        {isConfirmed && (
+          <div className="mt-3 py-2 bg-green-100 text-green-800 rounded-md text-center text-sm font-medium">
+            Trade confirmed
+          </div>
+        )}
       </div>
+
+      {/* Fill Price Modal */}
+      {showFillModal && (
+        <FillPriceModal
+          rec={rec}
+          onClose={() => setShowFillModal(false)}
+          onConfirm={handleConfirmTrade}
+        />
+      )}
     </div>
   );
 }
@@ -212,6 +378,10 @@ function SessionStatusBar() {
 export function RecommendationsPanel() {
   const recommendations = useOptionsStore((state) => state.recommendations);
   const abstain = useOptionsStore((state) => state.abstain);
+  const positions = useOptionsStore((state) => state.positions);
+
+  // Get set of confirmed recommendation IDs
+  const confirmedRecIds = new Set(positions.map((p) => p.recommendationId));
 
   return (
     <div className="bg-white rounded-lg shadow overflow-hidden">
@@ -241,7 +411,12 @@ export function RecommendationsPanel() {
         ) : (
           <div className="space-y-3">
             {recommendations.map((rec, index) => (
-              <RecommendationCard key={rec.id} rec={rec} isLatest={index === 0} />
+              <RecommendationCard
+                key={rec.id}
+                rec={rec}
+                isLatest={index === 0}
+                isConfirmed={confirmedRecIds.has(rec.id)}
+              />
             ))}
           </div>
         )}

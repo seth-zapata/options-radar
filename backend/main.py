@@ -30,9 +30,11 @@ from backend.data.aggregator import AggregatedOptionData
 from backend.engine import (
     GatingPipeline,
     PortfolioState,
+    PositionTracker,
     Recommendation,
     Recommender,
     SessionTracker,
+    TrackedPosition,
     evaluate_option_for_signal,
 )
 from backend.models.market_data import UnderlyingData
@@ -60,6 +62,7 @@ mock_generator: MockDataGenerator | None = None
 # Recommender and session tracking
 recommender = Recommender()
 session_tracker = SessionTracker()
+position_tracker = PositionTracker()
 
 # Rate limiting: track last recommendation time per contract
 _last_recommendation_time: dict[str, float] = {}
@@ -147,19 +150,56 @@ def recommendation_to_dict(rec: Recommendation) -> dict[str, Any]:
 
 
 def session_stats_to_dict() -> dict[str, Any]:
-    """Get current session stats as JSON-serializable dict."""
+    """Get current session stats as JSON-serializable dict.
+
+    Now uses position tracker for exposure (confirmed positions only).
+    """
     stats = session_tracker.get_stats()
+
+    # Override exposure with position tracker (confirmed positions only)
+    confirmed_exposure = position_tracker.get_total_exposure()
+    open_positions = position_tracker.get_open_positions()
+
     return {
         "sessionId": stats.session_id,
         "startedAt": stats.started_at,
         "recommendationCount": stats.recommendation_count,
-        "totalExposure": stats.total_exposure,
-        "exposureRemaining": stats.exposure_remaining,
-        "exposurePercent": stats.exposure_percent,
-        "isAtLimit": stats.is_at_limit,
-        "isWarning": stats.is_warning,
+        "totalExposure": confirmed_exposure,  # From confirmed positions
+        "exposureRemaining": max(0, 5000 - confirmed_exposure),  # $5k limit
+        "exposurePercent": round((confirmed_exposure / 5000) * 100, 1) if confirmed_exposure > 0 else 0,
+        "isAtLimit": confirmed_exposure >= 5000,
+        "isWarning": confirmed_exposure >= 4000 and confirmed_exposure < 5000,
         "recommendationsBySymbol": stats.recommendations_by_symbol,
         "lastRecommendationAt": stats.last_recommendation_at,
+        "openPositionCount": len(open_positions),
+        "totalPnl": position_tracker.get_total_pnl(),
+    }
+
+
+def position_to_dict(pos: TrackedPosition) -> dict[str, Any]:
+    """Convert TrackedPosition to JSON-serializable dict."""
+    return {
+        "id": pos.id,
+        "recommendationId": pos.recommendation_id,
+        "openedAt": pos.opened_at,
+        "underlying": pos.underlying,
+        "expiry": pos.expiry,
+        "strike": pos.strike,
+        "right": pos.right,
+        "action": pos.action,
+        "contracts": pos.contracts,
+        "fillPrice": pos.fill_price,
+        "entryCost": pos.entry_cost,
+        "currentPrice": pos.current_price,
+        "currentValue": pos.current_value,
+        "pnl": pos.pnl,
+        "pnlPercent": pos.pnl_percent,
+        "dte": pos.dte,
+        "delta": pos.delta,
+        "status": pos.status,
+        "exitReason": pos.exit_reason,
+        "closedAt": pos.closed_at,
+        "closePrice": pos.close_price,
     }
 
 
@@ -864,6 +904,107 @@ async def get_recommendations(limit: int = 10) -> dict[str, Any]:
     }
 
 
+@app.get("/api/positions")
+async def get_positions() -> dict[str, Any]:
+    """Get all tracked positions."""
+    open_positions = position_tracker.get_open_positions()
+    all_positions = position_tracker.get_all_positions()
+    return {
+        "openPositions": [position_to_dict(p) for p in open_positions],
+        "allPositions": [position_to_dict(p) for p in all_positions],
+        "totalExposure": position_tracker.get_total_exposure(),
+        "totalPnl": position_tracker.get_total_pnl(),
+    }
+
+
+@app.post("/api/positions/open")
+async def open_position(
+    recommendation_id: str,
+    fill_price: float,
+    contracts: int = 1,
+) -> dict[str, Any]:
+    """Confirm a trade and open a tracked position.
+
+    Args:
+        recommendation_id: ID of the recommendation being confirmed
+        fill_price: Actual fill price (may differ from displayed price)
+        contracts: Number of contracts (default 1)
+
+    Returns:
+        The created position
+    """
+    # Find the recommendation
+    recs = session_tracker.get_recent_recommendations(50)
+    rec = next((r for r in recs if r.id == recommendation_id), None)
+
+    if not rec:
+        return {"error": f"Recommendation not found: {recommendation_id}"}
+
+    try:
+        position = position_tracker.open_position(
+            recommendation_id=recommendation_id,
+            underlying=rec.underlying,
+            expiry=rec.expiry,
+            strike=rec.strike,
+            right=rec.right,
+            action=rec.action,
+            contracts=contracts,
+            fill_price=fill_price,
+        )
+
+        # Broadcast position update to all clients
+        await connection_manager.broadcast({
+            "type": "position_opened",
+            "data": position_to_dict(position),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+        # Also broadcast updated session stats
+        await connection_manager.broadcast({
+            "type": "session_status",
+            "data": session_stats_to_dict(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+        return {"position": position_to_dict(position)}
+
+    except ValueError as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/positions/{position_id}/close")
+async def close_position(position_id: str, close_price: float) -> dict[str, Any]:
+    """Close a tracked position.
+
+    Args:
+        position_id: ID of position to close
+        close_price: Price at which position was closed
+
+    Returns:
+        The closed position
+    """
+    position = position_tracker.close_position(position_id, close_price)
+
+    if not position:
+        return {"error": f"Position not found: {position_id}"}
+
+    # Broadcast position update
+    await connection_manager.broadcast({
+        "type": "position_closed",
+        "data": position_to_dict(position),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+    # Broadcast updated session stats
+    await connection_manager.broadcast({
+        "type": "session_status",
+        "data": session_stats_to_dict(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+    return {"position": position_to_dict(position)}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     """WebSocket endpoint for real-time updates."""
@@ -935,6 +1076,18 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 {
                     "type": "recommendation",
                     "data": recommendation_to_dict(rec),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+
+        # Send open positions
+        open_positions = position_tracker.get_open_positions()
+        for pos in open_positions:
+            await connection_manager._send_to_client(
+                websocket,
+                {
+                    "type": "position_opened",
+                    "data": position_to_dict(pos),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
             )

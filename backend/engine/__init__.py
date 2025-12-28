@@ -53,6 +53,12 @@ from backend.engine.session_tracker import (
     SessionStats,
     SessionTracker,
 )
+from backend.engine.position_tracker import (
+    ExitSignal,
+    PositionTracker,
+    PositionTrackerConfig,
+    TrackedPosition,
+)
 
 __all__ = [
     # Gate types
@@ -97,4 +103,9 @@ __all__ = [
     "SessionConfig",
     "SessionStats",
     "SessionTracker",
+    # Position Tracker
+    "ExitSignal",
+    "PositionTracker",
+    "PositionTrackerConfig",
+    "TrackedPosition",
 ]

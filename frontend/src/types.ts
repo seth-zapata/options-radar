@@ -95,10 +95,45 @@ export interface SessionStatus {
   lastRecommendationAt: string | null;
 }
 
+export type PositionStatus = 'open' | 'closed' | 'exit_signal';
+
+export interface TrackedPosition {
+  id: string;
+  recommendationId: string;
+  openedAt: string;
+  underlying: string;
+  expiry: string;
+  strike: number;
+  right: string;
+  action: TradeAction;
+  contracts: number;
+  fillPrice: number;
+  entryCost: number;
+  currentPrice: number | null;
+  currentValue: number | null;
+  pnl: number;
+  pnlPercent: number;
+  dte: number | null;
+  delta: number | null;
+  status: PositionStatus;
+  exitReason: string | null;
+  closedAt: string | null;
+  closePrice: number | null;
+}
+
+export interface ExitSignal {
+  positionId: string;
+  reason: string;
+  currentPrice: number;
+  pnl: number;
+  pnlPercent: number;
+  urgency: 'low' | 'medium' | 'high';
+}
+
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
 
 export interface WebSocketMessage {
-  type: 'option_update' | 'underlying_update' | 'gate_status' | 'abstain' | 'connection_status' | 'error' | 'ping' | 'recommendation' | 'session_status';
+  type: 'option_update' | 'underlying_update' | 'gate_status' | 'abstain' | 'connection_status' | 'error' | 'ping' | 'recommendation' | 'session_status' | 'position_opened' | 'position_closed' | 'exit_signal';
   data?: unknown;
   timestamp?: string;
 }
