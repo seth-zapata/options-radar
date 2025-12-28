@@ -274,7 +274,7 @@ class GatingPipeline:
             return stage_result
 
         # Stage 7: Explain (all gates passed)
-        confidence_cap = self._calculate_confidence_cap(soft_failures)
+        confidence_cap = self._calculate_confidence_cap(soft_failures, all_results)
 
         return PipelineResult(
             passed=True,
@@ -492,10 +492,15 @@ class GatingPipeline:
             f"Gate '{failed_gate.gate_name}' must pass"
         )
 
-    def _calculate_confidence_cap(self, soft_failures: list[GateResult]) -> int:
-        """Calculate maximum confidence based on soft failures.
+    def _calculate_confidence_cap(
+        self,
+        soft_failures: list[GateResult],
+        all_results: list[GateResult],
+    ) -> int:
+        """Calculate maximum confidence based on soft failures and boost gates.
 
-        Each soft failure reduces confidence cap by a set amount.
+        Each soft failure reduces confidence.
+        Boost gates (fresh sentiment, high mentions) increase confidence.
         """
         base_confidence = 100
 
@@ -510,7 +515,34 @@ class GatingPipeline:
             deduction = deductions.get(failure.gate_name, 10)
             base_confidence -= deduction
 
-        return max(0, base_confidence)
+        # Check for confidence boosts from passing gates
+        for result in all_results:
+            if not result.passed:
+                continue
+
+            # High mentions boost (+5)
+            if result.gate_name == "high_mentions_boost":
+                if "High conviction" in result.message:
+                    base_confidence += 5
+
+            # Sentiment recency boost/penalty (+10 fresh, -10 stale)
+            if result.gate_name == "sentiment_recency":
+                if "confidence boost" in result.message:
+                    base_confidence += 10
+                elif "confidence penalty" in result.message:
+                    base_confidence -= 10
+
+            # Sentiment alignment boost (+10 when strongly aligned)
+            if result.gate_name == "sentiment_alignment":
+                # Check for strong alignment (both sources same direction)
+                if result.passed and result.value:
+                    news = result.value.get("news", 0)
+                    wsb = result.value.get("wsb", 0)
+                    # Both positive or both negative = strong alignment
+                    if (news > 20 and wsb > 20) or (news < -20 and wsb < -20):
+                        base_confidence += 10
+
+        return max(0, min(100, base_confidence))
 
 
 def evaluate_option_for_signal(

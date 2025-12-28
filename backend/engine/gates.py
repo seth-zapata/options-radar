@@ -136,6 +136,7 @@ class GateContext:
     news_is_buzzing: bool = False
     sources_aligned: bool = False  # True if news and WSB agree on direction
     wsb_mentions: int = 0  # WSB mention count for signal strength
+    sentiment_age_hours: float = 0.0  # Age of sentiment data in hours (for recency weighting)
 
     # Symbol identification (for per-symbol filtering)
     underlying_symbol: str = ""
@@ -845,6 +846,48 @@ class HighMentionsBoostGate(Gate):
         )
 
 
+class SentimentRecencyGate(Gate):
+    """SOFT gate: Adjusts confidence based on sentiment data freshness.
+
+    Fresh sentiment (< 4 hours) gets a confidence boost.
+    Stale sentiment (> 24 hours) gets a penalty.
+    Based on backtest showing recent data significantly outperforms historical.
+    """
+
+    FRESH_HOURS = 4.0  # Sentiment < 4 hours old = fresh
+    STALE_HOURS = 24.0  # Sentiment > 24 hours old = stale
+
+    @property
+    def name(self) -> str:
+        return "sentiment_recency"
+
+    @property
+    def severity(self) -> GateSeverity:
+        return GateSeverity.SOFT
+
+    def evaluate(self, ctx: GateContext) -> GateResult:
+        age = ctx.sentiment_age_hours
+
+        if age <= self.FRESH_HOURS:
+            message = f"Fresh sentiment ({age:.1f}h old) - confidence boost"
+            status = "fresh"
+        elif age >= self.STALE_HOURS:
+            message = f"Stale sentiment ({age:.1f}h old) - confidence penalty"
+            status = "stale"
+        else:
+            message = f"Sentiment {age:.1f}h old - normal"
+            status = "normal"
+
+        return GateResult(
+            gate_name=self.name,
+            passed=True,  # Always passes - this is a boost/penalty gate
+            value=age,
+            threshold=f"<{self.FRESH_HOURS}h boost, >{self.STALE_HOURS}h penalty",
+            message=message,
+            severity=self.severity,
+        )
+
+
 # =============================================================================
 # Gate Registry
 # =============================================================================
@@ -885,6 +928,7 @@ SENTIMENT_GATES: list[Gate] = [
     SentimentDirectionGate(),  # SOFT: Combined sentiment direction
     RetailMomentumGate(),      # SOFT: WSB trending momentum
     HighMentionsBoostGate(),   # SOFT: Confidence boost for high mentions
+    SentimentRecencyGate(),    # SOFT: Boost/penalty based on data freshness
 ]
 
 # All gates in pipeline order

@@ -69,9 +69,10 @@ class SignalQualityConfig:
 
     Based on backtest results showing which symbols/conditions have predictive power.
     """
-    # Symbols where signals are disabled (poor backtest accuracy ~50%)
+    # Symbols where signals are disabled (poor backtest accuracy ~50% or worse)
     # These can still be monitored in scanner but won't generate recommendations
-    signals_disabled: tuple[str, ...] = ("AMD", "AAPL")
+    # AMD/AAPL: ~50% accuracy, QQQ: 46.7% (worse than random for ETFs)
+    signals_disabled: tuple[str, ...] = ("AMD", "AAPL", "QQQ")
 
     # IV Rank thresholds for buy signals
     # Buy signals only fire when IV is relatively cheap
@@ -91,6 +92,13 @@ class SignalQualityConfig:
     alignment_confidence_boost: int = 10  # Bonus when news + WSB strongly aligned
     high_mentions_confidence_boost: int = 5  # Bonus for high mention count
     elevated_iv_confidence_penalty: int = 15  # Penalty for IV > 70
+
+    # Recency weighting for sentiment data
+    # Fresh sentiment data gets a confidence boost, stale data gets penalized
+    sentiment_fresh_hours: float = 4.0  # Sentiment < 4 hours old = fresh
+    sentiment_stale_hours: float = 24.0  # Sentiment > 24 hours old = stale
+    recency_fresh_boost: int = 10  # Bonus for fresh sentiment
+    recency_stale_penalty: int = 10  # Penalty for stale sentiment
 
 
 @dataclass(frozen=True)
