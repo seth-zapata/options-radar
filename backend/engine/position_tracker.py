@@ -74,7 +74,7 @@ class ExitSignal:
     pnl: float
     pnl_percent: float
     urgency: Literal["low", "medium", "high"]
-    trigger: Literal["profit_target", "stop_loss", "dte_warning", "sentiment_reversal"]
+    trigger: Literal["profit_target", "stop_loss", "dte_warning"]
 
 
 @dataclass
@@ -332,38 +332,10 @@ class PositionTracker:
                 trigger="dte_warning",
             )
 
-        # Sentiment reversal
-        # For long calls (BUY_CALL), bearish sentiment is a reversal
-        # For long puts (BUY_PUT), bullish sentiment is a reversal
-        if sentiment_score is not None:
-            is_long_call = position.action == "BUY_CALL"
-            is_long_put = position.action == "BUY_PUT"
-
-            # Threshold for reversal: sentiment strongly opposite to position direction
-            reversal_threshold = -25  # Score below -25 is bearish
-            bullish_threshold = 25    # Score above 25 is bullish
-
-            if is_long_call and sentiment_score <= reversal_threshold:
-                return ExitSignal(
-                    position_id=position.id,
-                    reason=f"Sentiment reversed to bearish ({sentiment_score:.0f})",
-                    current_price=position.current_price or 0,
-                    pnl=position.pnl,
-                    pnl_percent=position.pnl_percent,
-                    urgency="medium",
-                    trigger="sentiment_reversal",
-                )
-
-            if is_long_put and sentiment_score >= bullish_threshold:
-                return ExitSignal(
-                    position_id=position.id,
-                    reason=f"Sentiment reversed to bullish (+{sentiment_score:.0f})",
-                    current_price=position.current_price or 0,
-                    pnl=position.pnl,
-                    pnl_percent=position.pnl_percent,
-                    urgency="medium",
-                    trigger="sentiment_reversal",
-                )
+        # NOTE: Sentiment reversal exit was REMOVED after P&L backtest showed
+        # +381% improvement without it. Profit target gains outweigh the
+        # stop loss protection that sentiment reversals provided.
+        # See: backend/scripts/compare_exits.py for the analysis.
 
         return None
 
