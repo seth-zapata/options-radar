@@ -57,6 +57,9 @@ class IVRankCalculator:
     def __init__(self, eodhd_client: EODHDClient):
         self.eodhd_client = eodhd_client
         self._init_cache_db()
+        # Cache statistics
+        self.cache_hits = 0
+        self.api_fetches = 0
 
     def _init_cache_db(self) -> None:
         """Initialize SQLite cache database."""
@@ -243,9 +246,13 @@ class IVRankCalculator:
         if use_cache:
             cached = self._get_cached_iv(symbol, date)
             if cached is not None:
+                self.cache_hits += 1
+                logger.info(f"[CACHE HIT] {symbol} {date} IV={cached:.4f}")
                 return cached
 
         # Fetch from EODHD
+        self.api_fetches += 1
+        logger.info(f"[API FETCH] {symbol} {date}")
         chain = await self.eodhd_client.fetch_options_chain(symbol, date, use_cache=False)
 
         if chain is None:
@@ -255,7 +262,7 @@ class IVRankCalculator:
 
         if atm_iv is not None:
             self._cache_iv(symbol, date, atm_iv, underlying_price)
-            logger.debug(f"Cached IV for {symbol} on {date}: {atm_iv:.4f}")
+            logger.info(f"[CACHED] {symbol} {date} IV={atm_iv:.4f}")
 
         return atm_iv
 

@@ -54,14 +54,14 @@ cp .env.example .env
 The $199/mo ORATS subscription provides IV Rank for live signals. We validated whether this filter improves signal quality using EODHD historical data:
 
 ```
-IV RANK VALIDATION (28 signals, Oct 2024 - Dec 2024)
-  IV Rank <= 45% (PASS gate): 71.4% accuracy
-  IV Rank >  45% (FAIL gate): 64.3% accuracy
-  IV RANK FILTER EDGE: +7.1%
-  --> VERDICT: IV Rank filter provides meaningful edge. ORATS justified.
+IV RANK VALIDATION (111 signals, Jan 2024 - Dec 2024)
+  IV Rank <= 45% (PASS gate): 67.1% accuracy (73 signals)
+  IV Rank >  45% (FAIL gate): 65.8% accuracy (38 signals)
+  IV RANK FILTER EDGE: +1.3%
+  --> VERDICT: IV Rank filter provides marginal edge. ORATS optional.
 ```
 
-The IV Rank gate blocks signals when IV Rank > 45%, improving win rate by ~7%. This edge justifies the ORATS subscription cost.
+The IV Rank gate blocks signals when IV Rank > 45%, providing a small +1.3% edge. This marginal improvement may not justify the $199/mo ORATS cost for most users. Consider using EODHD historical IV data as an alternative.
 
 ## Testing
 
@@ -230,11 +230,11 @@ python -m backend.run_backtest --symbols TSLA,NVDA --start 2024-01-01 --include-
 python -m backend.run_backtest --symbols TSLA,NVDA,PLTR --start 2024-10-01 --include-iv-rank
 ```
 
-**Key findings from full backtest (508 signals, 2021-2024):**
-- Overall accuracy: 56.5%
-- Max Pain: +1.6% edge (not significant, made informational only)
-- P/C Ratio: +33.3% edge but only 6 signals (kept as +5 modifier)
-- IV Rank: +7.1% edge (justifies ORATS $199/mo subscription)
+**Key findings from IV Rank backtest (111 signals with IV data, 2024):**
+- Overall accuracy: 67.5%
+- Max Pain: +5.5% edge (informational only)
+- P/C Ratio: +100.0% edge but only 2 signals (kept as +5 modifier)
+- IV Rank: +1.3% edge (marginal - ORATS subscription optional)
 
 ## Development
 
