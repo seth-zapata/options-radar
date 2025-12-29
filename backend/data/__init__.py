@@ -30,6 +30,12 @@ from backend.data.staleness import (
     StalenessThresholds,
 )
 from backend.data.subscription_manager import SubscriptionManager
+from backend.data.technicals import (
+    TechnicalAnalyzer,
+    TechnicalIndicators,
+    calculate_rsi,
+    calculate_sma,
+)
 
 __all__ = [
     "AccountInfo",
@@ -60,6 +66,10 @@ __all__ = [
     "StalenessChecker",
     "StalenessThresholds",
     "SubscriptionManager",
+    "TechnicalAnalyzer",
+    "TechnicalIndicators",
     "WSBSentiment",
+    "calculate_rsi",
+    "calculate_sma",
     "check_market_hours",
 ]

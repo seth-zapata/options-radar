@@ -21,6 +21,7 @@ from typing import Literal
 
 from backend.data.aggregator import AggregatedOptionData
 from backend.data.sentiment_aggregator import CombinedSentiment
+from backend.data.technicals import TechnicalIndicators
 from backend.engine.gates import (
     ALL_GATES,
     DATA_FRESHNESS_GATES,
@@ -186,6 +187,7 @@ class GatingPipeline:
         contracts: int = 1,
         portfolio: PortfolioState | None = None,
         sentiment: CombinedSentiment | None = None,
+        technicals: TechnicalIndicators | None = None,
     ) -> PipelineResult:
         """Run the full gating pipeline for an option.
 
@@ -196,6 +198,7 @@ class GatingPipeline:
             contracts: Number of contracts
             portfolio: Current portfolio state
             sentiment: Combined sentiment data from news + WSB
+            technicals: Technical indicators (RSI, SMA, volume)
 
         Returns:
             PipelineResult with pass/fail and details
@@ -277,7 +280,11 @@ class GatingPipeline:
             return stage_result
 
         # Stage 7: Explain (all gates passed)
-        confidence_cap = self._calculate_confidence_cap(soft_failures, all_results, sentiment)
+        # Determine if signal is bullish for technical alignment
+        is_bullish = action in ("BUY_CALL", "SELL_PUT")
+        confidence_cap = self._calculate_confidence_cap(
+            soft_failures, all_results, sentiment, technicals, is_bullish
+        )
 
         return PipelineResult(
             passed=True,
@@ -545,12 +552,15 @@ class GatingPipeline:
         soft_failures: list[GateResult],
         all_results: list[GateResult],
         sentiment: CombinedSentiment | None = None,
+        technicals: TechnicalIndicators | None = None,
+        is_bullish: bool = True,
     ) -> int:
         """Calculate maximum confidence based on soft failures and boost gates.
 
         Each soft failure reduces confidence.
         Boost gates (fresh sentiment, high mentions) increase confidence.
         Three-source alignment (News + WSB + Social) modifies confidence.
+        Technical indicators (RSI, SMA, Volume) modify confidence based on alignment.
         """
         base_confidence = 100
 
@@ -604,6 +614,23 @@ class GatingPipeline:
                     f"[{sentiment.alignment_tag}]"
                 )
 
+        # Apply technical analysis modifier (RSI, SMA, Volume)
+        # RSI: +5 if aligned (oversold+bullish or overbought+bearish), -5 if against
+        # SMA: +5 if with trend, -5 if against trend
+        # Volume: +5 if high volume (>1.5x avg)
+        if technicals:
+            tech_modifier = technicals.get_directional_modifier(is_bullish)
+            if tech_modifier != 0:
+                base_confidence += tech_modifier
+                logger.debug(
+                    f"Applied {tech_modifier:+d} technical modifier "
+                    f"[RSI={technicals.rsi:.0f if technicals.rsi else 'N/A'}, "
+                    f"Trend={technicals.trend_signal}, "
+                    f"Vol={technicals.volume_ratio:.1f}x]" if technicals.volume_ratio else
+                    f"[RSI={technicals.rsi:.0f if technicals.rsi else 'N/A'}, "
+                    f"Trend={technicals.trend_signal}]"
+                )
+
         return max(0, min(100, base_confidence))
 
 
@@ -614,6 +641,7 @@ def evaluate_option_for_signal(
     contracts: int = 1,
     portfolio: PortfolioState | None = None,
     sentiment: CombinedSentiment | None = None,
+    technicals: TechnicalIndicators | None = None,
 ) -> PipelineResult:
     """Convenience function to evaluate an option through the pipeline.
 
@@ -624,9 +652,12 @@ def evaluate_option_for_signal(
         contracts: Number of contracts
         portfolio: Portfolio state
         sentiment: Combined sentiment data from news + WSB
+        technicals: Technical indicators (RSI, SMA, volume)
 
     Returns:
         PipelineResult
     """
     pipeline = GatingPipeline()
-    return pipeline.evaluate(option, underlying, action, contracts, portfolio, sentiment)
+    return pipeline.evaluate(
+        option, underlying, action, contracts, portfolio, sentiment, technicals
+    )
