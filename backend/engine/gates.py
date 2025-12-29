@@ -141,6 +141,9 @@ class GateContext:
     # Symbol identification (for per-symbol filtering)
     underlying_symbol: str = ""
 
+    # Technical indicators (Phase 7 - from backtest findings)
+    rsi: float | None = None  # RSI value (0-100)
+
 
 class Gate(ABC):
     """Abstract base class for gates.
@@ -375,59 +378,87 @@ class VolumeSufficientGate(Gate):
 # Stage 3: Strategy Fit Gates
 # =============================================================================
 
-class IVRankAppropriateGate(Gate):
-    """Ensures IV rank is appropriate for the action. SOFT gate.
+class IVRankExtremesGate(Gate):
+    """IV Rank gate using extremes framework for sentiment-driven momentum trades.
 
-    For buying premium: IV rank should be <= 45 (buy cheap)
-    For selling premium: IV rank should be > 30 (collect premium)
+    Based on backtest of 111 signals (Jan-Dec 2024):
+    - IV < 30%: 68.3% accuracy (60 signals) - BEST, cheap premium
+    - IV > 60%: 67.7% accuracy (33 signals) - GOOD if strong sentiment
+    - IV 30-60%: 55.6% accuracy (18 signals) - WORST, "no man's land"
 
-    Note: IV rank > 70 results in an "elevated IV risk" soft failure.
+    This inverts traditional premium-seller logic because we're directional
+    buyers riding sentiment waves, not selling volatility. High IV on meme
+    stocks often confirms retail excitement rather than warning of overpriced options.
+
+    Confidence modifiers:
+    - IV < 30%: +5 (cheap premium, clear value)
+    - IV > 60% + strong sentiment (>0.3): +5 (retail excitement confirmed)
+    - IV 30-60%: -5 (neutral zone, worst performance)
     """
 
-    # Thresholds - tightened based on TastyTrade research
-    BUY_MAX_IV_RANK = 45.0  # Only buy when IV is relatively cheap (<=45)
-    SELL_MIN_IV_RANK = 30.0  # Selling premium needs some IV
-    ELEVATED_IV_THRESHOLD = 70.0  # High IV = elevated risk
+    LOW_IV_THRESHOLD = 30.0  # Below = cheap premium, +5 boost
+    HIGH_IV_THRESHOLD = 60.0  # Above = needs strong sentiment for +5 boost
+    STRONG_SENTIMENT_THRESHOLD = 0.3  # |normalized| > 0.3 = strong
 
     @property
     def name(self) -> str:
-        return "iv_rank_appropriate"
+        return "iv_rank_extremes"
 
     @property
     def severity(self) -> GateSeverity:
         return GateSeverity.SOFT
 
     def evaluate(self, ctx: GateContext) -> GateResult:
-        buying_premium = ctx.action in ("BUY_CALL", "BUY_PUT")
+        iv_rank = ctx.iv_rank
 
-        if buying_premium:
-            # For buys: want low IV (<= 45) to avoid paying inflated premium
-            if ctx.iv_rank >= self.ELEVATED_IV_THRESHOLD:
+        # Normalize sentiment for strong check
+        has_strong_sentiment = False
+        if ctx.combined_sentiment_score is not None:
+            normalized_sentiment = abs(ctx.combined_sentiment_score / 100.0)
+            has_strong_sentiment = normalized_sentiment > self.STRONG_SENTIMENT_THRESHOLD
+
+        # Extremes framework logic
+        if iv_rank < self.LOW_IV_THRESHOLD:
+            # Low IV = cheap premium, always good
+            return GateResult(
+                gate_name=self.name,
+                passed=True,  # +5 boost applied by pipeline
+                value=iv_rank,
+                threshold=f"< {self.LOW_IV_THRESHOLD}",
+                message=f"Low IV ({iv_rank:.1f}%) - cheap premium (+5 boost)",
+                severity=self.severity,
+            )
+        elif iv_rank > self.HIGH_IV_THRESHOLD:
+            # High IV - good only with strong sentiment
+            if has_strong_sentiment:
                 return GateResult(
                     gate_name=self.name,
-                    passed=False,
-                    value=ctx.iv_rank,
-                    threshold=f"<= {self.BUY_MAX_IV_RANK}",
-                    message=f"IV rank {ctx.iv_rank:.1f} elevated - premium expensive",
+                    passed=True,  # +5 boost applied by pipeline
+                    value=iv_rank,
+                    threshold=f"> {self.HIGH_IV_THRESHOLD} + strong sentiment",
+                    message=f"High IV ({iv_rank:.1f}%) + strong sentiment - retail excitement confirmed (+5 boost)",
                     severity=self.severity,
                 )
-            passed = ctx.iv_rank <= self.BUY_MAX_IV_RANK
-            threshold = f"<= {self.BUY_MAX_IV_RANK}"
-            message = "OK" if passed else f"IV rank {ctx.iv_rank:.1f} above ideal for buying"
+            else:
+                # High IV without strong sentiment - neutral (no penalty, no boost)
+                return GateResult(
+                    gate_name=self.name,
+                    passed=True,  # No penalty, just no boost
+                    value=iv_rank,
+                    threshold=f"> {self.HIGH_IV_THRESHOLD}",
+                    message=f"High IV ({iv_rank:.1f}%) without strong sentiment - no boost",
+                    severity=self.severity,
+                )
         else:
-            # For sells: want decent IV (> 30) to collect premium
-            passed = ctx.iv_rank > self.SELL_MIN_IV_RANK
-            threshold = f"> {self.SELL_MIN_IV_RANK}"
-            message = "OK" if passed else f"IV rank {ctx.iv_rank:.1f} too low for selling premium"
-
-        return GateResult(
-            gate_name=self.name,
-            passed=passed,
-            value=ctx.iv_rank,
-            threshold=threshold,
-            message=message,
-            severity=self.severity,
-        )
+            # Neutral zone (30-60%) = worst performance, apply penalty
+            return GateResult(
+                gate_name=self.name,
+                passed=False,  # -5 penalty applied by pipeline
+                value=iv_rank,
+                threshold=f"< {self.LOW_IV_THRESHOLD} or > {self.HIGH_IV_THRESHOLD}",
+                message=f"IV ({iv_rank:.1f}%) in neutral zone (30-60%) - worst performance (-5 penalty)",
+                severity=self.severity,
+            )
 
 
 class DeltaInRangeGate(Gate):
@@ -823,11 +854,16 @@ class RetailMomentumGate(Gate):
 class HighMentionsBoostGate(Gate):
     """SOFT gate: Provides confidence boost for high mention counts.
 
-    When a symbol has 20+ WSB mentions, we consider this "high conviction"
-    and award a confidence boost (gate passes with bonus message).
+    Based on backtest "extremes framework" analysis:
+    - High mentions (>30): 72.2% accuracy
+    - Moderate mentions (10-30): 64.4% accuracy
+    - Edge: +7.8%
+
+    When a symbol has 30+ WSB mentions, we consider this "high conviction"
+    and award a confidence boost (+5).
     """
 
-    HIGH_THRESHOLD = 20
+    HIGH_THRESHOLD = 30  # Updated from 20 based on backtest extremes framework
 
     @property
     def name(self) -> str:
@@ -893,6 +929,116 @@ class SentimentRecencyGate(Gate):
 
 
 # =============================================================================
+# Stage 6: Technical Indicator Gates (from backtest findings)
+# =============================================================================
+
+class RSIOverboughtGate(Gate):
+    """HARD gate: Blocks RSI > 70 + bullish trades (negative EV).
+
+    Based on backtest of 114 signals (Jan-Dec 2024):
+    - RSI > 70 + Bullish: 43.8% accuracy (16 signals) = NEGATIVE EV
+    - RSI 30-70 + Bullish: 75.4% accuracy (69 signals)
+    - RSI < 30 + Bullish: Traditional reversal opportunity
+
+    Key insight: RSI measures price exhaustion, not conviction. Unlike
+    sentiment/IV where extremes outperform, RSI extremes indicate reversal risk.
+    """
+
+    OVERBOUGHT_THRESHOLD = 70.0
+
+    @property
+    def name(self) -> str:
+        return "rsi_overbought"
+
+    @property
+    def severity(self) -> GateSeverity:
+        return GateSeverity.HARD
+
+    def evaluate(self, ctx: GateContext) -> GateResult:
+        # If no RSI data, pass (don't block on missing data)
+        if ctx.rsi is None:
+            return GateResult(
+                gate_name=self.name,
+                passed=True,
+                value=None,
+                threshold=f"< {self.OVERBOUGHT_THRESHOLD} for bullish",
+                message="No RSI data available (skipped)",
+                severity=self.severity,
+            )
+
+        is_bullish_trade = ctx.action in ("BUY_CALL", "SELL_PUT")
+
+        # Only block overbought + bullish (the negative EV combination)
+        if is_bullish_trade and ctx.rsi > self.OVERBOUGHT_THRESHOLD:
+            return GateResult(
+                gate_name=self.name,
+                passed=False,
+                value=ctx.rsi,
+                threshold=f"< {self.OVERBOUGHT_THRESHOLD}",
+                message=f"RSI {ctx.rsi:.1f} overbought - bullish trades blocked (43.8% backtest accuracy)",
+                severity=self.severity,
+            )
+
+        # Bearish trades with high RSI are fine (shorting overbought)
+        # Bullish trades with normal/oversold RSI are fine
+        return GateResult(
+            gate_name=self.name,
+            passed=True,
+            value=ctx.rsi,
+            threshold=f"< {self.OVERBOUGHT_THRESHOLD} for bullish",
+            message="OK" if not is_bullish_trade else f"RSI {ctx.rsi:.1f} acceptable for bullish",
+            severity=self.severity,
+        )
+
+
+class StrongSentimentBoostGate(Gate):
+    """SOFT gate: Provides confidence boost for strong sentiment signals.
+
+    Based on backtest "extremes framework" analysis:
+    - Strong sentiment (|score| > 0.3): 83.3% accuracy
+    - Moderate sentiment (0.1-0.3): 66.7% accuracy
+    - Edge: +16.7%
+
+    For conviction indicators like sentiment, extremes outperform neutral.
+    """
+
+    STRONG_THRESHOLD = 0.3  # |normalized_sentiment| > 0.3 = strong
+
+    @property
+    def name(self) -> str:
+        return "strong_sentiment_boost"
+
+    @property
+    def severity(self) -> GateSeverity:
+        return GateSeverity.SOFT
+
+    def evaluate(self, ctx: GateContext) -> GateResult:
+        # Normalize combined sentiment to -1 to 1 range (from -100 to 100)
+        if ctx.combined_sentiment_score is None:
+            return GateResult(
+                gate_name=self.name,
+                passed=True,
+                value=None,
+                threshold=f"|sentiment| > {self.STRONG_THRESHOLD}",
+                message="No sentiment data (skipped)",
+                severity=self.severity,
+            )
+
+        # Normalize to -1 to 1 range
+        normalized = ctx.combined_sentiment_score / 100.0
+        is_strong = abs(normalized) > self.STRONG_THRESHOLD
+
+        return GateResult(
+            gate_name=self.name,
+            passed=True,  # Always passes - this is a boost gate
+            value=abs(normalized),
+            threshold=f"> {self.STRONG_THRESHOLD} for boost",
+            message=f"Strong conviction ({normalized:+.2f})" if is_strong else f"Moderate conviction ({normalized:+.2f})",
+            severity=self.severity,
+        )
+
+
+# =============================================================================
 # Gate Registry
 # =============================================================================
 
@@ -910,7 +1056,7 @@ LIQUIDITY_GATES: list[Gate] = [
 ]
 
 STRATEGY_FIT_GATES: list[Gate] = [
-    IVRankAppropriateGate(),
+    IVRankExtremesGate(),  # Extremes framework: < 30% = +5, > 60% + sentiment = +5, 30-60% = -5
     DeltaInRangeGate(),
 ]
 
@@ -929,10 +1075,16 @@ SIGNAL_QUALITY_GATES: list[Gate] = [
 
 # Sentiment enhancement gates - SOFT gates for confidence adjustment
 SENTIMENT_GATES: list[Gate] = [
-    SentimentDirectionGate(),  # SOFT: Combined sentiment direction
-    RetailMomentumGate(),      # SOFT: WSB trending momentum
-    HighMentionsBoostGate(),   # SOFT: Confidence boost for high mentions
-    SentimentRecencyGate(),    # SOFT: Boost/penalty based on data freshness
+    SentimentDirectionGate(),    # SOFT: Combined sentiment direction
+    RetailMomentumGate(),        # SOFT: WSB trending momentum
+    HighMentionsBoostGate(),     # SOFT: Confidence boost for 30+ mentions (+5)
+    StrongSentimentBoostGate(),  # SOFT: Confidence boost for |sentiment| > 0.3 (+5)
+    SentimentRecencyGate(),      # SOFT: Boost/penalty based on data freshness
+]
+
+# Technical indicator gates - from backtest findings (Phase 7)
+TECHNICAL_GATES: list[Gate] = [
+    RSIOverboughtGate(),  # HARD: Block RSI > 70 + bullish (43.8% accuracy = negative EV)
 ]
 
 # All gates in pipeline order
@@ -942,7 +1094,8 @@ ALL_GATES: list[Gate] = (
     STRATEGY_FIT_GATES +
     PORTFOLIO_CONSTRAINT_GATES +
     SIGNAL_QUALITY_GATES +
-    SENTIMENT_GATES
+    SENTIMENT_GATES +
+    TECHNICAL_GATES
 )
 
 
