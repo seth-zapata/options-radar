@@ -77,6 +77,35 @@ IV RANK ANALYSIS (111 signals, Jan 2024 - Dec 2024)
 
 This inverts traditional premium-seller logic because we're **directional buyers** riding sentiment waves, not selling volatility. High IV on meme stocks often confirms retail excitement rather than warning of overpriced options.
 
+### Dual Framework: Conviction vs Price Exhaustion
+
+Our backtest revealed that **extremes outperform neutral** for conviction indicators, but **NOT** for price exhaustion indicators:
+
+```
+EXTREMES FRAMEWORK ANALYSIS (114 signals, 2024)
+
+  CONVICTION INDICATORS (Extremes = Good):
+    WSB Sentiment: Strong (83.3%) vs Moderate (66.7%) = +16.7% edge
+    WSB Mentions:  High (72.2%) vs Moderate (64.4%) = +7.8% edge
+    IV Rank:       Extremes (68%) vs Neutral (55.6%) = +12% edge
+
+  PRICE EXHAUSTION INDICATORS (Extremes = Bad):
+    RSI > 70 + Bullish: 43.8% accuracy (16 signals) --> NEGATIVE EV
+    RSI 30-70 + Bullish: 75.4% accuracy (69 signals)
+```
+
+**Key Insight:** Sentiment/volatility indicators measure *conviction* (more = better). RSI measures *price exhaustion* (extremes = reversal risk).
+
+### RSI > 70 Hard Gate (Recommended)
+
+With only **43.8% accuracy** on 16 signals, RSI > 70 + bullish is a **negative expected value** trade. This should be a **hard gate**, not a soft penalty:
+
+| Condition | Action | Accuracy |
+|-----------|--------|----------|
+| **RSI > 70 + Bullish** | **BLOCK (Hard Gate)** | 43.8% (negative EV) |
+| RSI 30-70 + Bullish | Allow | 75.4% |
+| RSI < 30 + Bullish | +5 confidence | Traditional reversal |
+
 ## Testing
 
 ### Phase 1: Data Foundation
