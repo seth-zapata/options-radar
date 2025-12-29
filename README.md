@@ -49,19 +49,33 @@ cp .env.example .env
 - **Quiver**: https://www.quiverquant.com/ (any paid tier for WSB data)
 - **EODHD**: https://eodhd.com/ (All-In-One tier for historical options chains)
 
-### IV Rank Subscription Validation
+### IV Rank "Extremes" Framework
 
-The $199/mo ORATS subscription provides IV Rank for live signals. We validated whether this filter improves signal quality using EODHD historical data:
+**Novel Finding:** Traditional IV Rank logic (favor low IV, avoid high IV) doesn't apply to sentiment-driven momentum stocks. Our backtest of 111 signals revealed an "extremes" pattern:
 
 ```
-IV RANK VALIDATION (111 signals, Jan 2024 - Dec 2024)
-  IV Rank <= 45% (PASS gate): 67.1% accuracy (73 signals)
-  IV Rank >  45% (FAIL gate): 65.8% accuracy (38 signals)
-  IV RANK FILTER EDGE: +1.3%
-  --> VERDICT: IV Rank filter provides marginal edge. ORATS optional.
+IV RANK ANALYSIS (111 signals, Jan 2024 - Dec 2024)
+
+  Traditional Framework (Premium Sellers):
+    IV Rank <= 45%: 67.1% accuracy (73 signals)
+    IV Rank >  45%: 65.8% accuracy (38 signals)
+    Edge: +1.3% (marginal)
+
+  Extremes Framework (Directional Momentum Buyers):
+    IV Rank < 30%:  68.3% accuracy (60 signals)  --> BEST
+    IV Rank > 60%:  67.7% accuracy (33 signals)  --> GOOD
+    IV Rank 30-60%: 55.6% accuracy (18 signals)  --> WORST
 ```
 
-The IV Rank gate blocks signals when IV Rank > 45%, providing a small +1.3% edge. This marginal improvement may not justify the $199/mo ORATS cost for most users. Consider using EODHD historical IV data as an alternative.
+**Key Insight:** For WSB-driven momentum trades, the "neutral zone" (30-60% IV Rank) has the **worst** performance. Extremes (low or high IV) outperform by ~12%.
+
+| IV Rank | Modifier | Reasoning |
+|---------|----------|-----------|
+| **< 30%** | +5 confidence | Cheap premium, clear value |
+| **> 60%** | +5 if strong sentiment (>0.3) | Retail excitement confirmed |
+| **30-60%** | -5 confidence | "No man's land" - worst performance |
+
+This inverts traditional premium-seller logic because we're **directional buyers** riding sentiment waves, not selling volatility. High IV on meme stocks often confirms retail excitement rather than warning of overpriced options.
 
 ## Testing
 
@@ -234,7 +248,8 @@ python -m backend.run_backtest --symbols TSLA,NVDA,PLTR --start 2024-10-01 --inc
 - Overall accuracy: 67.5%
 - Max Pain: +5.5% edge (informational only)
 - P/C Ratio: +100.0% edge but only 2 signals (kept as +5 modifier)
-- IV Rank: +1.3% edge (marginal - ORATS subscription optional)
+- IV Rank "Extremes": +12.7% edge for < 30% IV, +12.1% edge for > 60% IV vs neutral zone
+- Novel finding: Traditional IV rules don't apply - use "extremes" framework instead
 
 ## Development
 

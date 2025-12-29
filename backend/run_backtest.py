@@ -165,6 +165,20 @@ class BacktestStats:
     iv_rank_fail_total: int = 0    # IV Rank > 45%
     iv_rank_data_signals: int = 0  # Signals with IV Rank data
 
+    # IV Rank "retail confirmation" analysis (alternative framework)
+    # High IV + strong sentiment = retail excitement confirmation
+    iv_high_strong_sent_correct: int = 0  # IV > 60% + sentiment > 0.3
+    iv_high_strong_sent_total: int = 0
+    # Low IV = cheap premium opportunity
+    iv_low_correct: int = 0               # IV < 30%
+    iv_low_total: int = 0
+    # Mid IV = neutral
+    iv_mid_correct: int = 0               # IV 30-60%
+    iv_mid_total: int = 0
+    # High IV + weak sentiment (caution - IV high but weak conviction)
+    iv_high_weak_sent_correct: int = 0    # IV > 60% + sentiment <= 0.3
+    iv_high_weak_sent_total: int = 0
+
     @property
     def accuracy(self) -> float:
         if self.total_signals == 0:
@@ -750,6 +764,33 @@ async def run_backtest(
                     if signal_result.was_profitable:
                         stats.iv_rank_fail_correct += 1
 
+                # "Retail confirmation" analysis (alternative framework for directional buyers)
+                iv_rank = signal_result.iv_rank
+                wsb_sent = abs(signal_result.wsb_sentiment)  # Use absolute value for strength
+
+                if iv_rank > 60:
+                    # High IV - check sentiment strength
+                    if wsb_sent > 0.3:
+                        # High IV + strong sentiment = retail excitement confirmation
+                        stats.iv_high_strong_sent_total += 1
+                        if signal_result.was_profitable:
+                            stats.iv_high_strong_sent_correct += 1
+                    else:
+                        # High IV + weak sentiment = caution
+                        stats.iv_high_weak_sent_total += 1
+                        if signal_result.was_profitable:
+                            stats.iv_high_weak_sent_correct += 1
+                elif iv_rank < 30:
+                    # Low IV = cheap premium
+                    stats.iv_low_total += 1
+                    if signal_result.was_profitable:
+                        stats.iv_low_correct += 1
+                else:
+                    # Mid IV (30-60) = neutral
+                    stats.iv_mid_total += 1
+                    if signal_result.was_profitable:
+                        stats.iv_mid_correct += 1
+
     return stats, all_results
 
 
@@ -870,6 +911,50 @@ def print_results(stats: BacktestStats) -> None:
                 print("  --> VERDICT: IV Rank filter provides small edge. ORATS marginally useful.")
             else:
                 print("  --> VERDICT: IV Rank filter provides NO edge. Consider canceling ORATS.")
+
+        # Alternative framework: "Retail Confirmation" analysis
+        print("\n" + "-" * 70)
+        print("IV RANK ALTERNATIVE FRAMEWORK: Retail Confirmation (Directional Buyers)")
+        print("-" * 70)
+        print("  For sentiment-driven momentum trades, high IV may CONFIRM retail excitement.")
+        print("  Traditional IV rules are for premium sellers - we're directional buyers.")
+
+        iv_high_strong_acc = (stats.iv_high_strong_sent_correct / stats.iv_high_strong_sent_total * 100) if stats.iv_high_strong_sent_total > 0 else 0
+        iv_high_weak_acc = (stats.iv_high_weak_sent_correct / stats.iv_high_weak_sent_total * 100) if stats.iv_high_weak_sent_total > 0 else 0
+        iv_low_acc = (stats.iv_low_correct / stats.iv_low_total * 100) if stats.iv_low_total > 0 else 0
+        iv_mid_acc = (stats.iv_mid_correct / stats.iv_mid_total * 100) if stats.iv_mid_total > 0 else 0
+
+        print(f"\n  IV Rank > 60% + Strong Sentiment (>0.3):")
+        print(f"    Accuracy: {iv_high_strong_acc:.1f}% ({stats.iv_high_strong_sent_total} signals)")
+        print(f"    --> \"Retail excitement confirmed\" - high IV validates the hype")
+
+        print(f"\n  IV Rank > 60% + Weak Sentiment (<=0.3):")
+        print(f"    Accuracy: {iv_high_weak_acc:.1f}% ({stats.iv_high_weak_sent_total} signals)")
+        print(f"    --> Caution: High premium but weak conviction")
+
+        print(f"\n  IV Rank < 30% (Any Sentiment):")
+        print(f"    Accuracy: {iv_low_acc:.1f}% ({stats.iv_low_total} signals)")
+        print(f"    --> Cheap premium opportunity")
+
+        print(f"\n  IV Rank 30-60% (Neutral Zone):")
+        print(f"    Accuracy: {iv_mid_acc:.1f}% ({stats.iv_mid_total} signals)")
+
+        # Calculate best strategy
+        print("\n  PROPOSED SOFT GATE MODIFIER:")
+        print("    IV Rank > 60% + Strong WSB Sentiment (>0.3): +5 confidence (retail confirmation)")
+        print("    IV Rank < 30%: +5 confidence (cheap premium)")
+        print("    IV Rank 30-60%: neutral (no modifier)")
+
+        # Show which approach wins
+        if stats.iv_high_strong_sent_total >= 3:
+            if iv_high_strong_acc > iv_mid_acc + 5:
+                print(f"\n  --> FINDING: High IV + strong sentiment OUTPERFORMS by {iv_high_strong_acc - iv_mid_acc:+.1f}%")
+                print("      High IV is a POSITIVE signal for sentiment-driven trades!")
+            elif iv_high_strong_acc < iv_mid_acc - 5:
+                print(f"\n  --> FINDING: High IV + strong sentiment UNDERPERFORMS by {iv_high_strong_acc - iv_mid_acc:+.1f}%")
+                print("      Original framework correct: avoid high IV even with strong sentiment.")
+            else:
+                print(f"\n  --> FINDING: No significant difference ({iv_high_strong_acc - iv_mid_acc:+.1f}%)")
 
     print("\n" + "=" * 70)
 
