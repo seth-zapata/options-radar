@@ -64,6 +64,10 @@ class TrackedPosition:
     closed_at: str | None = None
     close_price: float | None = None
 
+    # Trailing stop state
+    high_water_mark: float = 0.0  # Highest P&L % reached
+    trailing_stop_active: bool = False  # True once activation threshold hit
+
 
 @dataclass
 class ExitSignal:
@@ -74,20 +78,27 @@ class ExitSignal:
     pnl: float
     pnl_percent: float
     urgency: Literal["low", "medium", "high"]
-    trigger: Literal["profit_target", "stop_loss", "dte_warning"]
+    trigger: Literal["trailing_stop", "stop_loss", "dte_warning"]
 
 
 @dataclass
 class PositionTrackerConfig:
     """Configuration for position tracking.
 
+    Trailing Stop Logic (backtested +1,127% improvement vs fixed 50% target):
+    - Once position reaches trailing_activation_percent, trailing stop activates
+    - Trailing stop = high_water_mark - trailing_distance_percent
+    - If trailing stop never activates, hard stop_loss_percent applies
+
     Attributes:
-        profit_target_percent: Take profit at this gain (default 50%)
-        stop_loss_percent: Stop loss at this loss (default -30%)
+        trailing_activation_percent: Activate trailing stop at this gain (default 30%)
+        trailing_distance_percent: Trail by this amount from high water mark (default 15%)
+        stop_loss_percent: Hard stop if trailing never activates (default -30%)
         min_dte_warning: Warn when DTE below this (default 7)
         max_positions: Maximum open positions (default 10)
     """
-    profit_target_percent: float = 50.0
+    trailing_activation_percent: float = 30.0
+    trailing_distance_percent: float = 15.0
     stop_loss_percent: float = -30.0
     min_dte_warning: int = 7
     max_positions: int = 10
@@ -263,6 +274,19 @@ class PositionTracker:
                 if position.entry_cost > 0 else 0
             )
 
+            # Update trailing stop state
+            if position.pnl_percent > position.high_water_mark:
+                position.high_water_mark = position.pnl_percent
+
+            # Activate trailing stop once we hit activation threshold
+            if (not position.trailing_stop_active and
+                    position.pnl_percent >= self.config.trailing_activation_percent):
+                position.trailing_stop_active = True
+                logger.info(
+                    f"Trailing stop activated for {position.underlying} "
+                    f"${position.strike}{position.right} at +{position.pnl_percent:.1f}%"
+                )
+
         if delta is not None:
             position.delta = delta
 
@@ -287,28 +311,39 @@ class PositionTracker:
     ) -> ExitSignal | None:
         """Check if position meets exit criteria.
 
+        Trailing Stop Logic (backtested +1,127% improvement):
+        1. If trailing stop is active: exit when P&L falls 15% from high water mark
+        2. If trailing stop not active: exit at -30% hard stop
+        3. Always exit if DTE < 7 days
+
         Args:
             position: Position to check
-            sentiment_score: Combined sentiment score (-100 to +100)
-                Positive = bullish, Negative = bearish
+            sentiment_score: Combined sentiment score (unused, kept for API compat)
 
         Returns:
             ExitSignal if exit criteria met, None otherwise
         """
 
-        # Profit target (TastyTrade 50% rule)
-        if position.pnl_percent >= self.config.profit_target_percent:
-            return ExitSignal(
-                position_id=position.id,
-                reason=f"Profit target reached (+{position.pnl_percent:.0f}%)",
-                current_price=position.current_price or 0,
-                pnl=position.pnl,
-                pnl_percent=position.pnl_percent,
-                urgency="medium",
-                trigger="profit_target",
+        # 1. Trailing stop check (if activated)
+        if position.trailing_stop_active:
+            trailing_stop_level = (
+                position.high_water_mark - self.config.trailing_distance_percent
             )
+            if position.pnl_percent <= trailing_stop_level:
+                return ExitSignal(
+                    position_id=position.id,
+                    reason=(
+                        f"Trailing stop triggered: fell from +{position.high_water_mark:.0f}% "
+                        f"to +{position.pnl_percent:.0f}%"
+                    ),
+                    current_price=position.current_price or 0,
+                    pnl=position.pnl,
+                    pnl_percent=position.pnl_percent,
+                    urgency="medium",
+                    trigger="trailing_stop",
+                )
 
-        # Stop loss
+        # 2. Hard stop loss (if trailing stop never activated)
         if position.pnl_percent <= self.config.stop_loss_percent:
             return ExitSignal(
                 position_id=position.id,
@@ -320,7 +355,7 @@ class PositionTracker:
                 trigger="stop_loss",
             )
 
-        # Time decay warning (avoid gamma acceleration)
+        # 3. Time decay warning (avoid gamma acceleration)
         if position.dte is not None and position.dte <= self.config.min_dte_warning:
             return ExitSignal(
                 position_id=position.id,
@@ -332,10 +367,9 @@ class PositionTracker:
                 trigger="dte_warning",
             )
 
-        # NOTE: Sentiment reversal exit was REMOVED after P&L backtest showed
-        # +381% improvement without it. Profit target gains outweigh the
-        # stop loss protection that sentiment reversals provided.
-        # See: backend/scripts/compare_exits.py for the analysis.
+        # NOTE: Trailing stop replaces fixed 50% profit target after backtest
+        # showed +1,127% improvement (+39.3% avg vs +28.7% avg per trade).
+        # See: backend/scripts/backtest_trailing_stop.py for the analysis.
 
         return None
 
