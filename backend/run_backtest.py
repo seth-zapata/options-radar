@@ -179,6 +179,30 @@ class BacktestStats:
     iv_high_weak_sent_correct: int = 0    # IV > 60% + sentiment <= 0.3
     iv_high_weak_sent_total: int = 0
 
+    # WSB Sentiment Score extremes analysis
+    sent_strong_correct: int = 0    # |sentiment| > 0.3
+    sent_strong_total: int = 0
+    sent_moderate_correct: int = 0  # 0.1 < |sentiment| <= 0.3
+    sent_moderate_total: int = 0
+    sent_weak_correct: int = 0      # |sentiment| <= 0.1
+    sent_weak_total: int = 0
+
+    # WSB Mentions extremes analysis
+    mentions_high_correct: int = 0     # mentions > 30
+    mentions_high_total: int = 0
+    mentions_moderate_correct: int = 0  # 10 <= mentions <= 30
+    mentions_moderate_total: int = 0
+    mentions_low_correct: int = 0      # mentions < 10
+    mentions_low_total: int = 0
+
+    # RSI momentum confirmation (for meme stocks, RSI > 70 + bullish might be good)
+    rsi_extreme_bullish_correct: int = 0   # RSI > 70 + bullish signal
+    rsi_extreme_bullish_total: int = 0
+    rsi_mid_bullish_correct: int = 0       # 30 < RSI < 70 + bullish signal
+    rsi_mid_bullish_total: int = 0
+    rsi_oversold_bullish_correct: int = 0  # RSI < 30 + bullish signal
+    rsi_oversold_bullish_total: int = 0
+
     @property
     def accuracy(self) -> float:
         if self.total_signals == 0:
@@ -791,6 +815,55 @@ async def run_backtest(
                     if signal_result.was_profitable:
                         stats.iv_mid_correct += 1
 
+            # WSB Sentiment Score extremes analysis
+            wsb_sent_abs = abs(signal_result.wsb_sentiment)
+            if wsb_sent_abs > 0.3:
+                stats.sent_strong_total += 1
+                if signal_result.was_profitable:
+                    stats.sent_strong_correct += 1
+            elif wsb_sent_abs > 0.1:
+                stats.sent_moderate_total += 1
+                if signal_result.was_profitable:
+                    stats.sent_moderate_correct += 1
+            else:
+                stats.sent_weak_total += 1
+                if signal_result.was_profitable:
+                    stats.sent_weak_correct += 1
+
+            # WSB Mentions extremes analysis
+            mentions = signal_result.wsb_mentions
+            if mentions > 30:
+                stats.mentions_high_total += 1
+                if signal_result.was_profitable:
+                    stats.mentions_high_correct += 1
+            elif mentions >= 10:
+                stats.mentions_moderate_total += 1
+                if signal_result.was_profitable:
+                    stats.mentions_moderate_correct += 1
+            else:
+                stats.mentions_low_total += 1
+                if signal_result.was_profitable:
+                    stats.mentions_low_correct += 1
+
+            # RSI momentum confirmation (for bullish signals only)
+            if is_bullish and signal_result.rsi is not None:
+                rsi = signal_result.rsi
+                if rsi > 70:
+                    # Overbought + bullish = momentum confirmation?
+                    stats.rsi_extreme_bullish_total += 1
+                    if signal_result.was_profitable:
+                        stats.rsi_extreme_bullish_correct += 1
+                elif rsi > 30:
+                    # Mid RSI + bullish = normal
+                    stats.rsi_mid_bullish_total += 1
+                    if signal_result.was_profitable:
+                        stats.rsi_mid_bullish_correct += 1
+                else:
+                    # Oversold + bullish = traditional reversal
+                    stats.rsi_oversold_bullish_total += 1
+                    if signal_result.was_profitable:
+                        stats.rsi_oversold_bullish_correct += 1
+
     return stats, all_results
 
 
@@ -955,6 +1028,95 @@ def print_results(stats: BacktestStats) -> None:
                 print("      Original framework correct: avoid high IV even with strong sentiment.")
             else:
                 print(f"\n  --> FINDING: No significant difference ({iv_high_strong_acc - iv_mid_acc:+.1f}%)")
+
+    # EXTREMES FRAMEWORK ANALYSIS - Test if extremes outperform neutral across all indicators
+    print("\n" + "=" * 70)
+    print("EXTREMES FRAMEWORK ANALYSIS: Does 'extremes beat neutral' apply broadly?")
+    print("=" * 70)
+
+    # 1. WSB Sentiment Score extremes
+    print("\n" + "-" * 70)
+    print("1. WSB SENTIMENT SCORE EXTREMES")
+    print("-" * 70)
+    sent_strong_acc = (stats.sent_strong_correct / stats.sent_strong_total * 100) if stats.sent_strong_total > 0 else 0
+    sent_moderate_acc = (stats.sent_moderate_correct / stats.sent_moderate_total * 100) if stats.sent_moderate_total > 0 else 0
+    sent_weak_acc = (stats.sent_weak_correct / stats.sent_weak_total * 100) if stats.sent_weak_total > 0 else 0
+
+    print(f"  Strong Sentiment (|score| > 0.3):   {sent_strong_acc:.1f}% ({stats.sent_strong_total} signals)")
+    print(f"  Moderate Sentiment (0.1 < |s| ≤ 0.3): {sent_moderate_acc:.1f}% ({stats.sent_moderate_total} signals)")
+    print(f"  Weak Sentiment (|score| ≤ 0.1):     {sent_weak_acc:.1f}% ({stats.sent_weak_total} signals)")
+
+    if stats.sent_strong_total > 0 and stats.sent_moderate_total > 0:
+        sent_edge = sent_strong_acc - sent_moderate_acc
+        if sent_edge > 5:
+            print(f"\n  --> FINDING: Strong sentiment OUTPERFORMS moderate by {sent_edge:+.1f}%")
+            print("      Extremes pattern CONFIRMED for sentiment score!")
+        elif sent_edge < -5:
+            print(f"\n  --> FINDING: Strong sentiment UNDERPERFORMS moderate by {sent_edge:+.1f}%")
+            print("      Extremes pattern NOT confirmed - moderate sentiment better.")
+        else:
+            print(f"\n  --> FINDING: No significant difference ({sent_edge:+.1f}%)")
+
+    # 2. WSB Mentions extremes
+    print("\n" + "-" * 70)
+    print("2. WSB MENTIONS EXTREMES")
+    print("-" * 70)
+    mentions_high_acc = (stats.mentions_high_correct / stats.mentions_high_total * 100) if stats.mentions_high_total > 0 else 0
+    mentions_mod_acc = (stats.mentions_moderate_correct / stats.mentions_moderate_total * 100) if stats.mentions_moderate_total > 0 else 0
+    mentions_low_acc = (stats.mentions_low_correct / stats.mentions_low_total * 100) if stats.mentions_low_total > 0 else 0
+
+    print(f"  High Mentions (>30):      {mentions_high_acc:.1f}% ({stats.mentions_high_total} signals)")
+    print(f"  Moderate Mentions (10-30): {mentions_mod_acc:.1f}% ({stats.mentions_moderate_total} signals)")
+    print(f"  Low Mentions (<10):       {mentions_low_acc:.1f}% ({stats.mentions_low_total} signals)")
+
+    if stats.mentions_high_total > 0 and stats.mentions_moderate_total > 0:
+        mentions_edge = mentions_high_acc - mentions_mod_acc
+        if mentions_edge > 5:
+            print(f"\n  --> FINDING: High mentions OUTPERFORMS moderate by {mentions_edge:+.1f}%")
+            print("      Extremes pattern CONFIRMED for mentions!")
+        elif mentions_edge < -5:
+            print(f"\n  --> FINDING: High mentions UNDERPERFORMS moderate by {mentions_edge:+.1f}%")
+            print("      Extremes pattern NOT confirmed - moderate mentions better.")
+        else:
+            print(f"\n  --> FINDING: No significant difference ({mentions_edge:+.1f}%)")
+
+    # 3. RSI momentum confirmation (bullish signals only)
+    print("\n" + "-" * 70)
+    print("3. RSI MOMENTUM CONFIRMATION (Bullish Signals Only)")
+    print("-" * 70)
+    print("  Traditional view: RSI > 70 + bullish = overbought warning (penalty)")
+    print("  Momentum view: RSI > 70 + bullish = momentum confirmation (bonus)")
+
+    rsi_extreme_acc = (stats.rsi_extreme_bullish_correct / stats.rsi_extreme_bullish_total * 100) if stats.rsi_extreme_bullish_total > 0 else 0
+    rsi_mid_acc = (stats.rsi_mid_bullish_correct / stats.rsi_mid_bullish_total * 100) if stats.rsi_mid_bullish_total > 0 else 0
+    rsi_oversold_acc = (stats.rsi_oversold_bullish_correct / stats.rsi_oversold_bullish_total * 100) if stats.rsi_oversold_bullish_total > 0 else 0
+
+    print(f"\n  RSI > 70 + Bullish (Overbought):   {rsi_extreme_acc:.1f}% ({stats.rsi_extreme_bullish_total} signals)")
+    print(f"  RSI 30-70 + Bullish (Normal):      {rsi_mid_acc:.1f}% ({stats.rsi_mid_bullish_total} signals)")
+    print(f"  RSI < 30 + Bullish (Oversold):     {rsi_oversold_acc:.1f}% ({stats.rsi_oversold_bullish_total} signals)")
+
+    if stats.rsi_extreme_bullish_total >= 3 and stats.rsi_mid_bullish_total > 0:
+        rsi_edge = rsi_extreme_acc - rsi_mid_acc
+        if rsi_edge > 5:
+            print(f"\n  --> FINDING: Overbought + bullish OUTPERFORMS by {rsi_edge:+.1f}%")
+            print("      For meme stocks, RSI > 70 is MOMENTUM CONFIRMATION, not a warning!")
+            print("      Consider: Change RSI > 70 + bullish from penalty to bonus.")
+        elif rsi_edge < -5:
+            print(f"\n  --> FINDING: Overbought + bullish UNDERPERFORMS by {rsi_edge:+.1f}%")
+            print("      Traditional view correct: RSI > 70 + bullish should remain a penalty.")
+        else:
+            print(f"\n  --> FINDING: No significant difference ({rsi_edge:+.1f}%)")
+
+    # Summary
+    print("\n" + "-" * 70)
+    print("EXTREMES FRAMEWORK SUMMARY")
+    print("-" * 70)
+    print("  Does 'extremes outperform neutral' apply to sentiment-driven stocks?")
+    print("")
+    print(f"  IV Rank:        Extremes ({iv_low_acc:.1f}%/{iv_high_weak_acc:.1f}%) vs Neutral ({iv_mid_acc:.1f}%)")
+    print(f"  Sentiment:      Strong ({sent_strong_acc:.1f}%) vs Moderate ({sent_moderate_acc:.1f}%)")
+    print(f"  Mentions:       High ({mentions_high_acc:.1f}%) vs Moderate ({mentions_mod_acc:.1f}%)")
+    print(f"  RSI (bullish):  Overbought ({rsi_extreme_acc:.1f}%) vs Normal ({rsi_mid_acc:.1f}%)")
 
     print("\n" + "=" * 70)
 
