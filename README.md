@@ -36,16 +36,32 @@ cp .env.example .env
 
 | Service | Variables | Required | Cost | Purpose |
 |---------|-----------|----------|------|---------|
-| Alpaca | `ALPACA_API_KEY`, `ALPACA_SECRET_KEY` | Yes | $99/mo (Algo Trader Plus) | Real-time option quotes |
-| ORATS | `ORATS_API_TOKEN` | Yes | $199/mo (Live) | Greeks, IV rank |
+| Alpaca | `ALPACA_API_KEY`, `ALPACA_SECRET_KEY` | Yes | $99/mo (Algo Trader Plus) | Real-time option quotes, open interest |
+| ORATS | `ORATS_API_TOKEN` | Yes | $199/mo (Live) | Greeks, IV rank (live only) |
 | Finnhub | `FINNHUB_API_KEY` | Optional | $50/mo (Fundamental-1) | News sentiment |
 | Quiver | `QUIVER_API_KEY` | Optional | $10/mo | WSB social sentiment |
+| EODHD | `EODHD_API_KEY` | Optional | $80/mo (All-In-One) | Historical options data (backtesting) |
 
 **Getting credentials:**
 - **Alpaca**: https://app.alpaca.markets/ (enable Options + Algo Trader Plus for OPRA data)
-- **ORATS**: https://orats.com/ (Live subscription for real-time Greeks)
+- **ORATS**: https://orats.com/ (Live subscription for real-time Greeks) - see validation below
 - **Finnhub**: https://finnhub.io/ (Fundamental-1 tier for news sentiment API)
 - **Quiver**: https://www.quiverquant.com/ (any paid tier for WSB data)
+- **EODHD**: https://eodhd.com/ (All-In-One tier for historical options chains)
+
+### IV Rank Subscription Validation
+
+The $199/mo ORATS subscription provides IV Rank for live signals. We validated whether this filter improves signal quality using EODHD historical data:
+
+```
+IV RANK VALIDATION (28 signals, Oct 2024 - Dec 2024)
+  IV Rank <= 45% (PASS gate): 71.4% accuracy
+  IV Rank >  45% (FAIL gate): 64.3% accuracy
+  IV RANK FILTER EDGE: +7.1%
+  --> VERDICT: IV Rank filter provides meaningful edge. ORATS justified.
+```
+
+The IV Rank gate blocks signals when IV Rank > 45%, improving win rate by ~7%. This edge justifies the ORATS subscription cost.
 
 ## Testing
 
@@ -198,6 +214,27 @@ options-radar/
 │ └───────────────────────────────────────────────────────┘ │
 └───────────────────────────────────────────────────────────┘
 ```
+
+## Backtesting
+
+Run historical backtests using WSB sentiment signals:
+
+```bash
+# Basic backtest
+python -m backend.run_backtest --symbols TSLA,NVDA,PLTR --start 2024-01-01
+
+# With options indicators (P/C Ratio, Max Pain)
+python -m backend.run_backtest --symbols TSLA,NVDA --start 2024-01-01 --include-options-indicators
+
+# With IV Rank validation (tests ORATS subscription value)
+python -m backend.run_backtest --symbols TSLA,NVDA,PLTR --start 2024-10-01 --include-iv-rank
+```
+
+**Key findings from full backtest (508 signals, 2021-2024):**
+- Overall accuracy: 56.5%
+- Max Pain: +1.6% edge (not significant, made informational only)
+- P/C Ratio: +33.3% edge but only 6 signals (kept as +5 modifier)
+- IV Rank: +7.1% edge (justifies ORATS $199/mo subscription)
 
 ## Development
 

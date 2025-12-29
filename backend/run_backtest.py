@@ -33,6 +33,7 @@ from backend.data.technicals import (
     calculate_sma,
 )
 from backend.data.eodhd_client import EODHDClient
+from backend.data.iv_rank_calculator import IVRankCalculator
 from backend.config import load_config, EODHDConfig
 
 logging.basicConfig(
@@ -78,6 +79,11 @@ class SignalResult:
     max_pain: float | None = None
     pcr_signal: Literal["bullish", "bearish", "neutral"] | None = None
     max_pain_signal: Literal["bullish", "bearish", "neutral"] | None = None
+
+    # IV Rank (calculated from EODHD historical IV)
+    iv_rank: float | None = None
+    current_iv: float | None = None
+    iv_rank_pass: bool = False  # True if IV Rank <= 45% for buys
 
     # Alignment flags
     rsi_aligned: bool = False
@@ -151,6 +157,13 @@ class BacktestStats:
 
     # Options data availability
     options_data_signals: int = 0
+
+    # IV Rank comparison (key validation metric for ORATS subscription)
+    iv_rank_pass_correct: int = 0  # IV Rank <= 45% and profitable
+    iv_rank_pass_total: int = 0    # IV Rank <= 45%
+    iv_rank_fail_correct: int = 0  # IV Rank > 45% and profitable
+    iv_rank_fail_total: int = 0    # IV Rank > 45%
+    iv_rank_data_signals: int = 0  # Signals with IV Rank data
 
     @property
     def accuracy(self) -> float:
@@ -448,6 +461,7 @@ async def run_backtest(
     min_mentions: int = 5,
     sentiment_threshold: float = 0.1,
     include_options: bool = False,
+    include_iv_rank: bool = False,
     eodhd_api_key: str | None = None,
 ) -> tuple[BacktestStats, list[SignalResult]]:
     """Run backtest using actual WSB sentiment data.
@@ -460,17 +474,23 @@ async def run_backtest(
         min_mentions: Minimum WSB mentions for signal
         sentiment_threshold: Minimum sentiment magnitude
         include_options: Whether to fetch options data (P/C ratio, max pain)
-        eodhd_api_key: EODHD API key for options data
+        include_iv_rank: Whether to calculate IV Rank from EODHD historical IV
+        eodhd_api_key: EODHD API key for options data and IV Rank
     """
 
     stats = BacktestStats()
     all_results: list[SignalResult] = []
 
-    # Initialize EODHD client if options indicators enabled
+    # Initialize EODHD client if options indicators or IV Rank enabled
     eodhd_client: EODHDClient | None = None
-    if include_options and eodhd_api_key:
+    iv_rank_calculator: IVRankCalculator | None = None
+    if (include_options or include_iv_rank) and eodhd_api_key:
         eodhd_client = EODHDClient(config=EODHDConfig(api_key=eodhd_api_key))
-        logger.info("Options indicators enabled (EODHD)")
+        if include_options:
+            logger.info("Options indicators enabled (EODHD)")
+        if include_iv_rank:
+            iv_rank_calculator = IVRankCalculator(eodhd_client)
+            logger.info("IV Rank calculation enabled (EODHD historical IV)")
 
     for symbol in symbols:
         logger.info(f"Processing {symbol}...")
@@ -549,6 +569,21 @@ async def run_backtest(
                 except Exception as e:
                     logger.debug(f"No options data for {symbol} on {wsb.date}: {e}")
 
+            # Calculate IV Rank if enabled
+            iv_rank_result = None
+            if iv_rank_calculator:
+                try:
+                    iv_rank_result = await iv_rank_calculator.get_iv_rank(
+                        symbol, wsb.date, entry_price
+                    )
+                    if iv_rank_result:
+                        logger.debug(
+                            f"IV Rank for {symbol} on {wsb.date}: {iv_rank_result.iv_rank:.1f}% "
+                            f"(IV={iv_rank_result.current_iv:.2f}, {iv_rank_result.data_points} pts)"
+                        )
+                except Exception as e:
+                    logger.debug(f"No IV Rank data for {symbol} on {wsb.date}: {e}")
+
             alignment = get_tech_modifier(tech, is_bullish, options_data, entry_price)
 
             # Compute max pain signal based on price vs max pain
@@ -560,6 +595,11 @@ async def run_backtest(
                     max_pain_signal = "bearish"
                 else:
                     max_pain_signal = "neutral"
+
+            # Compute IV Rank pass/fail (for buy signals, IV Rank <= 45% is favorable)
+            iv_rank_pass = False
+            if iv_rank_result and iv_rank_result.iv_rank is not None:
+                iv_rank_pass = iv_rank_result.iv_rank <= 45.0
 
             signal_result = SignalResult(
                 symbol=symbol,
@@ -580,6 +620,9 @@ async def run_backtest(
                 max_pain=options_data.max_pain if options_data else None,
                 pcr_signal=options_data.pcr_signal if options_data else None,
                 max_pain_signal=max_pain_signal,
+                iv_rank=iv_rank_result.iv_rank if iv_rank_result else None,
+                current_iv=iv_rank_result.current_iv if iv_rank_result else None,
+                iv_rank_pass=iv_rank_pass,
                 rsi_aligned=alignment.rsi_aligned,
                 trend_aligned=alignment.trend_aligned,
                 high_volume=alignment.high_vol,
@@ -695,6 +738,18 @@ async def run_backtest(
                             if signal_result.was_profitable:
                                 stats.maxpain_against_correct += 1
 
+            # IV Rank (key metric for validating ORATS subscription)
+            if signal_result.iv_rank is not None:
+                stats.iv_rank_data_signals += 1
+                if signal_result.iv_rank_pass:  # IV Rank <= 45%
+                    stats.iv_rank_pass_total += 1
+                    if signal_result.was_profitable:
+                        stats.iv_rank_pass_correct += 1
+                else:  # IV Rank > 45%
+                    stats.iv_rank_fail_total += 1
+                    if signal_result.was_profitable:
+                        stats.iv_rank_fail_correct += 1
+
     return stats, all_results
 
 
@@ -792,6 +847,30 @@ def print_results(stats: BacktestStats) -> None:
             if stats.maxpain_aligned_total > 0 and stats.maxpain_against_total > 0:
                 print(f"    Max Pain Edge: {mp_aligned_acc - mp_against_acc:+.1f}%")
 
+    # IV Rank Validation (validates ORATS $199/mo subscription value)
+    if stats.iv_rank_data_signals > 0:
+        print("\n" + "-" * 70)
+        print(f"IV RANK VALIDATION (EODHD Historical IV) - {stats.iv_rank_data_signals} signals with data")
+        print("-" * 70)
+        print("  This validates whether the ORATS $199/mo IV Rank filter improves signals.")
+        print("  Current gate: Block signals when IV Rank > 45%")
+
+        iv_pass_acc = (stats.iv_rank_pass_correct / stats.iv_rank_pass_total * 100) if stats.iv_rank_pass_total > 0 else 0
+        iv_fail_acc = (stats.iv_rank_fail_correct / stats.iv_rank_fail_total * 100) if stats.iv_rank_fail_total > 0 else 0
+
+        print(f"\n  IV Rank <= 45% (PASS gate): {iv_pass_acc:.1f}% ({stats.iv_rank_pass_total} signals)")
+        print(f"  IV Rank >  45% (FAIL gate): {iv_fail_acc:.1f}% ({stats.iv_rank_fail_total} signals)")
+
+        if stats.iv_rank_pass_total > 0 and stats.iv_rank_fail_total > 0:
+            edge = iv_pass_acc - iv_fail_acc
+            print(f"\n  IV RANK FILTER EDGE: {edge:+.1f}%")
+            if edge > 5:
+                print("  --> VERDICT: IV Rank filter provides meaningful edge. ORATS justified.")
+            elif edge > 0:
+                print("  --> VERDICT: IV Rank filter provides small edge. ORATS marginally useful.")
+            else:
+                print("  --> VERDICT: IV Rank filter provides NO edge. Consider canceling ORATS.")
+
     print("\n" + "=" * 70)
 
 
@@ -834,19 +913,25 @@ async def main():
         action="store_true",
         help="Include Put/Call Ratio and Max Pain from EODHD (requires EODHD_API_KEY)",
     )
+    parser.add_argument(
+        "--include-iv-rank",
+        action="store_true",
+        help="Calculate IV Rank from EODHD historical IV (validates ORATS subscription value)",
+    )
 
     args = parser.parse_args()
     symbols = [s.strip().upper() for s in args.symbols.split(",")]
 
     # Load API keys from config
+    needs_eodhd = args.include_options_indicators or args.include_iv_rank
     try:
         config = load_config()
         api_key = config.quiver.api_key
-        eodhd_api_key = config.eodhd.api_key if args.include_options_indicators else None
+        eodhd_api_key = config.eodhd.api_key if needs_eodhd else None
     except Exception as e:
         logger.error(f"Failed to load config: {e}")
         api_key = os.environ.get("QUIVER_API_KEY", "")
-        eodhd_api_key = os.environ.get("EODHD_API_KEY", "") if args.include_options_indicators else None
+        eodhd_api_key = os.environ.get("EODHD_API_KEY", "") if needs_eodhd else None
 
     if not api_key:
         logger.error("No Quiver API key found. Set QUIVER_API_KEY or configure in .env")
@@ -856,6 +941,10 @@ async def main():
         logger.warning("--include-options-indicators specified but no EODHD_API_KEY found. Disabling options indicators.")
         args.include_options_indicators = False
 
+    if args.include_iv_rank and not eodhd_api_key:
+        logger.warning("--include-iv-rank specified but no EODHD_API_KEY found. Disabling IV Rank.")
+        args.include_iv_rank = False
+
     print(f"Running backtest for {symbols}")
     print(f"Period: {args.start} to today")
     print(f"Holding period: {args.holding} days")
@@ -863,6 +952,8 @@ async def main():
     print(f"Sentiment threshold: {args.sentiment_threshold}")
     if args.include_options_indicators:
         print(f"Options indicators: ENABLED (EODHD)")
+    if args.include_iv_rank:
+        print(f"IV Rank validation: ENABLED (EODHD historical IV)")
 
     stats, results = await run_backtest(
         symbols=symbols,
@@ -872,6 +963,7 @@ async def main():
         min_mentions=args.min_mentions,
         sentiment_threshold=args.sentiment_threshold,
         include_options=args.include_options_indicators,
+        include_iv_rank=args.include_iv_rank,
         eodhd_api_key=eodhd_api_key,
     )
 
