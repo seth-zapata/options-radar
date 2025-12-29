@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from backend.config import AppConfig
-from backend.data.finnhub_client import FinnhubClient, NewsSentiment
+from backend.data.finnhub_client import FinnhubClient, NewsSentiment, SocialSentiment
 from backend.data.quiver_client import QuiverClient, WSBSentiment
 
 logger = logging.getLogger(__name__)
@@ -26,21 +26,29 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class CombinedSentiment:
-    """Combined sentiment from two complementary sources.
+    """Combined sentiment from multiple sources.
 
-    Two sentiment categories:
+    Three sentiment sources:
     - News: Traditional media/analyst sentiment (catalyst/trigger)
-    - Social: WallStreetBets retail sentiment (confirmation/risk overlay)
+    - Social: Finnhub social media sentiment (Reddit/Twitter)
+    - WSB: WallStreetBets retail sentiment (confirmation/risk overlay)
+
+    Scoring: News (50%) + WSB (50%) = Combined Score
+    Social sentiment is used as a confidence modifier, not a scoring component.
     """
 
     symbol: str
     timestamp: str
 
-    # News sentiment (Finnhub)
+    # News sentiment (Finnhub /news-sentiment)
     news_sentiment: NewsSentiment | None = None
 
     # Social/Retail sentiment (Quiver WSB)
     wsb_sentiment: WSBSentiment | None = None
+
+    # Social media sentiment (Finnhub /stock/social-sentiment)
+    # Used as confidence modifier, not part of main score
+    social_sentiment: SocialSentiment | None = None
 
     @property
     def news_score(self) -> float:
@@ -54,6 +62,13 @@ class CombinedSentiment:
         """WSB/retail sentiment score (-100 to 100)."""
         if self.wsb_sentiment:
             return self.wsb_sentiment.sentiment_score
+        return 0.0
+
+    @property
+    def social_score(self) -> float:
+        """Finnhub social media sentiment score (-100 to 100)."""
+        if self.social_sentiment:
+            return self.social_sentiment.sentiment_score
         return 0.0
 
     @property
@@ -130,7 +145,7 @@ class CombinedSentiment:
 
     @property
     def sources_aligned(self) -> bool:
-        """True if both sources agree on direction."""
+        """True if News and WSB agree on direction."""
         if not self.news_sentiment or not self.wsb_sentiment:
             return False
 
@@ -142,6 +157,79 @@ class CombinedSentiment:
 
         return (news_bullish and wsb_bullish) or (news_bearish and wsb_bearish)
 
+    @property
+    def alignment_tag(self) -> str:
+        """Tag describing three-source alignment status.
+
+        Returns one of:
+        - THREE_ALIGNED: All three sources agree on direction
+        - SOCIAL_DIVERGENCE: Social disagrees with News+WSB
+        - NO_SOCIAL: No social sentiment data available
+        - TWO_ALIGNED: News+WSB agree but no third source check
+        """
+        # If no social data, we can't do three-way alignment
+        if not self.social_sentiment:
+            return "NO_SOCIAL"
+
+        # Need at least News or WSB to compare
+        if not self.news_sentiment and not self.wsb_sentiment:
+            return "NO_SOCIAL"
+
+        # Determine directions (threshold of 10 for significance)
+        social_bullish = self.social_score > 10
+        social_bearish = self.social_score < -10
+        social_neutral = not social_bullish and not social_bearish
+
+        news_bullish = self.news_score > 10 if self.news_sentiment else None
+        news_bearish = self.news_score < -10 if self.news_sentiment else None
+
+        wsb_bullish = self.wsb_score > 10 if self.wsb_sentiment else None
+        wsb_bearish = self.wsb_score < -10 if self.wsb_sentiment else None
+
+        # Check if all three are bullish or all three are bearish
+        all_bullish = (
+            (news_bullish if news_bullish is not None else True) and
+            (wsb_bullish if wsb_bullish is not None else True) and
+            social_bullish
+        )
+        all_bearish = (
+            (news_bearish if news_bearish is not None else True) and
+            (wsb_bearish if wsb_bearish is not None else True) and
+            social_bearish
+        )
+
+        if all_bullish or all_bearish:
+            return "THREE_ALIGNED"
+
+        # Check if social disagrees with the primary sources
+        # Primary direction from News+WSB
+        primary_bullish = (news_bullish or wsb_bullish) and not (news_bearish or wsb_bearish)
+        primary_bearish = (news_bearish or wsb_bearish) and not (news_bullish or wsb_bullish)
+
+        if primary_bullish and social_bearish:
+            return "SOCIAL_DIVERGENCE"
+        if primary_bearish and social_bullish:
+            return "SOCIAL_DIVERGENCE"
+
+        # Social is neutral or weakly aligned
+        return "TWO_ALIGNED"
+
+    @property
+    def confidence_modifier(self) -> int:
+        """Confidence modifier based on three-source alignment.
+
+        Returns:
+            +10 if THREE_ALIGNED (all sources agree)
+            -5 if SOCIAL_DIVERGENCE (social disagrees)
+            0 otherwise
+        """
+        tag = self.alignment_tag
+        if tag == "THREE_ALIGNED":
+            return 10
+        elif tag == "SOCIAL_DIVERGENCE":
+            return -5
+        return 0
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to JSON-serializable dict."""
         return {
@@ -150,6 +238,7 @@ class CombinedSentiment:
             "scores": {
                 "news": round(self.news_score, 1),
                 "wsb": round(self.wsb_score, 1),
+                "social": round(self.social_score, 1),
                 "combined": round(self.combined_score, 1),
             },
             "signal": self.signal,
@@ -160,8 +249,13 @@ class CombinedSentiment:
                 "wsbBullish": self.wsb_is_bullish,
                 "sourcesAligned": self.sources_aligned,
             },
+            "alignment": {
+                "tag": self.alignment_tag,
+                "confidenceModifier": self.confidence_modifier,
+            },
             "newsSentiment": self.news_sentiment.to_dict() if self.news_sentiment else None,
             "wsbSentiment": self.wsb_sentiment.to_dict() if self.wsb_sentiment else None,
+            "socialSentiment": self.social_sentiment.to_dict() if self.social_sentiment else None,
         }
 
 
@@ -214,8 +308,9 @@ class SentimentAggregator:
     ) -> CombinedSentiment:
         """Get combined sentiment for a symbol.
 
-        Fetches from two sources:
+        Fetches from three sources:
         - Finnhub news sentiment (catalyst/trigger)
+        - Finnhub social sentiment (Reddit/Twitter - confidence modifier)
         - Quiver WSB sentiment (confirmation/risk overlay)
 
         Args:
@@ -241,6 +336,9 @@ class SentimentAggregator:
         if self._finnhub_client:
             tasks.append(self._finnhub_client.get_news_sentiment(symbol))
             task_names.append("news")
+            # Also fetch social sentiment from Finnhub
+            tasks.append(self._finnhub_client.get_social_sentiment(symbol))
+            task_names.append("social")
 
         if self._quiver_client:
             tasks.append(self._quiver_client.get_wsb_sentiment(symbol))
@@ -263,22 +361,26 @@ class SentimentAggregator:
             timestamp=datetime.now(timezone.utc).isoformat(),
             news_sentiment=results.get("news"),
             wsb_sentiment=results.get("wsb"),
+            social_sentiment=results.get("social"),
         )
 
         # Cache result
         self._cache[symbol] = (sentiment, now)
 
-        # Log summary
+        # Log summary with alignment tag for validation tracking
         sources = []
         if sentiment.news_sentiment:
             sources.append(f"news={sentiment.news_score:.0f}")
         if sentiment.wsb_sentiment:
             sources.append(f"wsb={sentiment.wsb_score:.0f}")
+        if sentiment.social_sentiment:
+            sources.append(f"social={sentiment.social_score:.0f}")
 
         logger.info(
             f"Sentiment for {symbol}: "
             f"combined={sentiment.combined_score:.0f} "
             f"({sentiment.signal}/{sentiment.strength}) "
+            f"[{sentiment.alignment_tag}] "
             f"[{', '.join(sources)}]"
         )
 

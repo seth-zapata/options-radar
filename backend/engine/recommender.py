@@ -84,7 +84,7 @@ class RecommenderConfig:
     default_contracts: int = 1
     max_contracts: int = 10
     min_confidence: int = 50
-    recommendation_ttl_seconds: int = 30
+    recommendation_ttl_seconds: int = 300  # 5 minutes
 
 
 class Recommender:

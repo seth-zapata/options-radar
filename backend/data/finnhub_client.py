@@ -66,6 +66,53 @@ class NewsSentiment:
 
 
 @dataclass
+class SocialSentiment:
+    """Social media sentiment data for a symbol.
+
+    From Finnhub /stock/social-sentiment endpoint.
+    Aggregates hourly Reddit/Twitter mentions and sentiment.
+    """
+
+    symbol: str
+    total_mentions: int  # Sum of hourly mentions
+    avg_positive_score: float  # Average positive score
+    avg_negative_score: float  # Average negative score
+    net_score: float  # Average net sentiment (-1 to 1)
+    hours_of_data: int  # Number of hourly data points
+    timestamp: str
+
+    @property
+    def sentiment_score(self) -> float:
+        """Normalized sentiment score from -100 to 100."""
+        return self.net_score * 100
+
+    @property
+    def is_bullish(self) -> bool:
+        """True if net sentiment is positive."""
+        return self.net_score > 0.1
+
+    @property
+    def is_bearish(self) -> bool:
+        """True if net sentiment is negative."""
+        return self.net_score < -0.1
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to JSON-serializable dict."""
+        return {
+            "symbol": self.symbol,
+            "totalMentions": self.total_mentions,
+            "avgPositiveScore": round(self.avg_positive_score, 3),
+            "avgNegativeScore": round(self.avg_negative_score, 3),
+            "netScore": round(self.net_score, 3),
+            "sentimentScore": round(self.sentiment_score, 1),
+            "hoursOfData": self.hours_of_data,
+            "isBullish": self.is_bullish,
+            "isBearish": self.is_bearish,
+            "timestamp": self.timestamp,
+        }
+
+
+@dataclass
 class CompanyNews:
     """Single news article for a company."""
 
@@ -115,6 +162,9 @@ class FinnhubClient:
 
     # Cache
     _sentiment_cache: dict[str, tuple[NewsSentiment, float]] = field(
+        default_factory=dict, init=False
+    )
+    _social_cache: dict[str, tuple[SocialSentiment | None, float]] = field(
         default_factory=dict, init=False
     )
     _cache_ttl: float = 300.0  # 5 minute cache
@@ -204,6 +254,79 @@ class FinnhubClient:
 
         except Exception as e:
             logger.error(f"Error fetching sentiment for {symbol}: {e}")
+            return None
+
+    async def get_social_sentiment(
+        self,
+        symbol: str,
+        use_cache: bool = True,
+    ) -> SocialSentiment | None:
+        """Get social media sentiment for a symbol.
+
+        Fetches from /stock/social-sentiment endpoint which aggregates
+        hourly Reddit/Twitter mentions and sentiment scores.
+
+        Args:
+            symbol: Stock symbol (e.g., "NVDA")
+            use_cache: Whether to use cached data
+
+        Returns:
+            SocialSentiment or None if unavailable
+        """
+        now = asyncio.get_event_loop().time()
+
+        # Check cache
+        if use_cache and symbol in self._social_cache:
+            cached, cached_time = self._social_cache[symbol]
+            if now - cached_time < self._cache_ttl:
+                logger.debug(f"Using cached social sentiment for {symbol}")
+                return cached
+
+        try:
+            data = await self._request("stock/social-sentiment", {"symbol": symbol})
+
+            if not data or "data" not in data or not data["data"]:
+                logger.debug(f"No social sentiment data for {symbol}")
+                # Cache the None result to avoid repeated API calls
+                self._social_cache[symbol] = (None, now)
+                return None
+
+            # Aggregate hourly data points
+            hourly_data = data["data"]
+            total_mentions = sum(h.get("mention", 0) for h in hourly_data)
+
+            # Calculate average scores
+            positive_scores = [h.get("positiveScore", 0) for h in hourly_data]
+            negative_scores = [h.get("negativeScore", 0) for h in hourly_data]
+            net_scores = [h.get("score", 0) for h in hourly_data]
+
+            avg_positive = sum(positive_scores) / len(positive_scores) if positive_scores else 0
+            avg_negative = sum(negative_scores) / len(negative_scores) if negative_scores else 0
+            net_score = sum(net_scores) / len(net_scores) if net_scores else 0
+
+            social = SocialSentiment(
+                symbol=symbol,
+                total_mentions=total_mentions,
+                avg_positive_score=avg_positive,
+                avg_negative_score=avg_negative,
+                net_score=net_score,
+                hours_of_data=len(hourly_data),
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+
+            # Cache the result
+            self._social_cache[symbol] = (social, now)
+
+            logger.info(
+                f"Finnhub social for {symbol}: "
+                f"mentions={total_mentions}, "
+                f"net_score={net_score:.2f}"
+            )
+
+            return social
+
+        except Exception as e:
+            logger.error(f"Error fetching social sentiment for {symbol}: {e}")
             return None
 
     async def get_company_news(

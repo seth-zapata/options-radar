@@ -74,6 +74,7 @@ class ExitSignal:
     pnl: float
     pnl_percent: float
     urgency: Literal["low", "medium", "high"]
+    trigger: Literal["profit_target", "stop_loss", "dte_warning", "sentiment_reversal"]
 
 
 @dataclass
@@ -234,6 +235,7 @@ class PositionTracker:
         current_price: float | None = None,
         delta: float | None = None,
         dte: int | None = None,
+        sentiment_score: float | None = None,
     ) -> ExitSignal | None:
         """Update a position with current market data and check for exit signals.
 
@@ -242,6 +244,7 @@ class PositionTracker:
             current_price: Current option price
             delta: Current delta
             dte: Days to expiration
+            sentiment_score: Combined sentiment score (-100 to +100)
 
         Returns:
             ExitSignal if exit criteria met, None otherwise
@@ -266,50 +269,101 @@ class PositionTracker:
         if dte is not None:
             position.dte = dte
 
-        # Check exit signals
-        exit_signal = self._check_exit_signals(position)
+        # Check exit signals (only if position doesn't already have an active exit signal)
+        if position.status != "exit_signal":
+            exit_signal = self._check_exit_signals(position, sentiment_score)
 
-        if exit_signal:
-            position.status = "exit_signal"
-            position.exit_reason = exit_signal.reason
+            if exit_signal:
+                position.status = "exit_signal"
+                position.exit_reason = exit_signal.reason
+                return exit_signal
 
-        return exit_signal
+        return None
 
-    def _check_exit_signals(self, position: TrackedPosition) -> ExitSignal | None:
-        """Check if position meets exit criteria."""
+    def _check_exit_signals(
+        self,
+        position: TrackedPosition,
+        sentiment_score: float | None = None,
+    ) -> ExitSignal | None:
+        """Check if position meets exit criteria.
 
-        # Profit target
+        Args:
+            position: Position to check
+            sentiment_score: Combined sentiment score (-100 to +100)
+                Positive = bullish, Negative = bearish
+
+        Returns:
+            ExitSignal if exit criteria met, None otherwise
+        """
+
+        # Profit target (TastyTrade 50% rule)
         if position.pnl_percent >= self.config.profit_target_percent:
             return ExitSignal(
                 position_id=position.id,
-                reason=f"Profit target reached ({position.pnl_percent:.1f}% >= {self.config.profit_target_percent}%)",
+                reason=f"Profit target reached (+{position.pnl_percent:.0f}%)",
                 current_price=position.current_price or 0,
                 pnl=position.pnl,
                 pnl_percent=position.pnl_percent,
                 urgency="medium",
+                trigger="profit_target",
             )
 
         # Stop loss
         if position.pnl_percent <= self.config.stop_loss_percent:
             return ExitSignal(
                 position_id=position.id,
-                reason=f"Stop loss triggered ({position.pnl_percent:.1f}% <= {self.config.stop_loss_percent}%)",
+                reason=f"Stop loss triggered ({position.pnl_percent:.0f}%)",
                 current_price=position.current_price or 0,
                 pnl=position.pnl,
                 pnl_percent=position.pnl_percent,
                 urgency="high",
+                trigger="stop_loss",
             )
 
-        # Time decay warning
+        # Time decay warning (avoid gamma acceleration)
         if position.dte is not None and position.dte <= self.config.min_dte_warning:
             return ExitSignal(
                 position_id=position.id,
-                reason=f"Time decay warning ({position.dte} DTE <= {self.config.min_dte_warning})",
+                reason=f"DTE warning ({position.dte} days remaining)",
                 current_price=position.current_price or 0,
                 pnl=position.pnl,
                 pnl_percent=position.pnl_percent,
                 urgency="medium" if position.dte > 3 else "high",
+                trigger="dte_warning",
             )
+
+        # Sentiment reversal
+        # For long calls (BUY_CALL), bearish sentiment is a reversal
+        # For long puts (BUY_PUT), bullish sentiment is a reversal
+        if sentiment_score is not None:
+            is_long_call = position.action == "BUY_CALL"
+            is_long_put = position.action == "BUY_PUT"
+
+            # Threshold for reversal: sentiment strongly opposite to position direction
+            reversal_threshold = -25  # Score below -25 is bearish
+            bullish_threshold = 25    # Score above 25 is bullish
+
+            if is_long_call and sentiment_score <= reversal_threshold:
+                return ExitSignal(
+                    position_id=position.id,
+                    reason=f"Sentiment reversed to bearish ({sentiment_score:.0f})",
+                    current_price=position.current_price or 0,
+                    pnl=position.pnl,
+                    pnl_percent=position.pnl_percent,
+                    urgency="medium",
+                    trigger="sentiment_reversal",
+                )
+
+            if is_long_put and sentiment_score >= bullish_threshold:
+                return ExitSignal(
+                    position_id=position.id,
+                    reason=f"Sentiment reversed to bullish (+{sentiment_score:.0f})",
+                    current_price=position.current_price or 0,
+                    pnl=position.pnl,
+                    pnl_percent=position.pnl_percent,
+                    urgency="medium",
+                    trigger="sentiment_reversal",
+                )
 
         return None
 
@@ -332,6 +386,23 @@ class PositionTracker:
     def get_total_pnl(self) -> float:
         """Get total P/L from all positions."""
         return sum(p.pnl for p in self._positions.values())
+
+    def clear_exit_signal(self, position_id: str) -> bool:
+        """Clear exit signal status for a position (user dismissed it).
+
+        Returns True if position was updated, False if not found.
+        """
+        position = self._positions.get(position_id)
+        if not position:
+            return False
+
+        if position.status == "exit_signal":
+            position.status = "open"
+            position.exit_reason = None
+            logger.info(f"Exit signal dismissed for {position.underlying} ${position.strike}")
+            return True
+
+        return False
 
     def clear_closed_positions(self) -> int:
         """Remove closed positions from tracking. Returns count removed."""

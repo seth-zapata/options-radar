@@ -191,6 +191,10 @@ export function useOptionsStream() {
                 addExitSignal(message.data as ExitSignal);
                 break;
 
+              case 'position_updated':
+                updatePosition(message.data as TrackedPosition);
+                break;
+
               case 'connection_status':
                 // Server confirmed connection
                 break;

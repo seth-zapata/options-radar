@@ -8,7 +8,7 @@ from backend.data.alpaca_account import (
     Position,
 )
 from backend.data.alpaca_client import AlpacaOptionsClient, ConnectionState
-from backend.data.finnhub_client import FinnhubClient, NewsSentiment, CompanyNews
+from backend.data.finnhub_client import FinnhubClient, NewsSentiment, CompanyNews, SocialSentiment
 from backend.data.market_hours import MarketStatus, check_market_hours, CT, ET
 from backend.data.mock_data import MockDataGenerator
 from backend.data.orats_client import ORATSClient
@@ -56,6 +56,7 @@ __all__ = [
     "Position",
     "QuiverClient",
     "SentimentAggregator",
+    "SocialSentiment",
     "StalenessChecker",
     "StalenessThresholds",
     "SubscriptionManager",

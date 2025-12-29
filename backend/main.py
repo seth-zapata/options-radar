@@ -30,6 +30,7 @@ from backend.config import load_config
 from backend.data import AlpacaAccountClient, AlpacaOptionsClient, DataAggregator, MockDataGenerator, ORATSClient, SubscriptionManager
 from backend.data.aggregator import AggregatedOptionData
 from backend.engine import (
+    ExitSignal,
     GatingPipeline,
     PortfolioState,
     PositionTracker,
@@ -88,8 +89,8 @@ session_replayer = SessionReplayer(persist_path="./logs/replays")
 # Rate limiting: track last recommendation time per contract AND per symbol
 _last_recommendation_time: dict[str, float] = {}  # Per contract (symbol+strike+expiry+right)
 _last_symbol_recommendation_time: dict[str, float] = {}  # Per underlying symbol
-RECOMMENDATION_COOLDOWN = 60.0  # Don't recommend same contract within 60 seconds
-SYMBOL_COOLDOWN = 60.0  # Don't recommend same underlying within 60 seconds
+RECOMMENDATION_COOLDOWN = 300.0  # Don't recommend same contract within 5 minutes (matches TTL)
+SYMBOL_COOLDOWN = 300.0  # Don't recommend same underlying within 5 minutes (matches TTL)
 
 # Background tasks
 _background_tasks: set[asyncio.Task] = set()
@@ -223,6 +224,29 @@ def position_to_dict(pos: TrackedPosition) -> dict[str, Any]:
         "exitReason": pos.exit_reason,
         "closedAt": pos.closed_at,
         "closePrice": pos.close_price,
+    }
+
+
+def exit_signal_to_dict(signal: ExitSignal, position: TrackedPosition) -> dict[str, Any]:
+    """Convert ExitSignal to JSON-serializable dict with position context."""
+    return {
+        "positionId": signal.position_id,
+        "reason": signal.reason,
+        "currentPrice": signal.current_price,
+        "pnl": signal.pnl,
+        "pnlPercent": signal.pnl_percent,
+        "urgency": signal.urgency,
+        "trigger": signal.trigger,
+        # Include position context for frontend display
+        "position": {
+            "underlying": position.underlying,
+            "strike": position.strike,
+            "right": position.right,
+            "expiry": position.expiry,
+            "action": position.action,
+            "contracts": position.contracts,
+            "fillPrice": position.fill_price,
+        },
     }
 
 
@@ -590,6 +614,86 @@ async def gate_evaluation_loop() -> None:
                             )
                         else:
                             logger.warning(f"Recommendation blocked for {symbol}: {reason}")
+
+            # === Exit Signal Checking for Open Positions ===
+            # Check all open positions for exit conditions
+            open_positions = position_tracker.get_open_positions()
+            for pos in open_positions:
+                # Find current option data for this position
+                current_price = None
+                delta = None
+                dte = None
+
+                # Get the option data from the appropriate source
+                if mock_generators and pos.underlying in mock_generators:
+                    gen = mock_generators[pos.underlying]
+                    all_opts = gen.get_all_options()
+                    # Find the matching option
+                    for opt in all_opts:
+                        cid = opt.canonical_id
+                        if (cid.strike == pos.strike and
+                            cid.expiry == pos.expiry and
+                            cid.right == pos.right):
+                            current_price = opt.mid
+                            delta = opt.delta
+                            break
+                elif aggregator:
+                    all_opts = aggregator.get_all_options()
+                    for opt in all_opts:
+                        cid = opt.canonical_id
+                        if (cid.underlying == pos.underlying and
+                            cid.strike == pos.strike and
+                            cid.expiry == pos.expiry and
+                            cid.right == pos.right):
+                            current_price = opt.mid
+                            delta = opt.delta
+                            break
+
+                # Calculate DTE from expiry date
+                try:
+                    from datetime import date
+                    expiry_date = date.fromisoformat(pos.expiry)
+                    dte = (expiry_date - now.date()).days
+                except (ValueError, AttributeError):
+                    dte = None
+
+                # Get sentiment for position's underlying
+                sentiment_score = None
+                try:
+                    scanner = get_scanner()
+                    if scanner._sentiment_aggregator:
+                        pos_sentiment = await scanner._sentiment_aggregator.get_sentiment(pos.underlying)
+                        if pos_sentiment:
+                            sentiment_score = pos_sentiment.combined_score
+                except Exception:
+                    pass  # Sentiment optional, don't block exit signal checking
+
+                # Update position and check for exit signals
+                exit_signal = position_tracker.update_position(
+                    position_id=pos.id,
+                    current_price=current_price,
+                    delta=delta,
+                    dte=dte,
+                    sentiment_score=sentiment_score,
+                )
+
+                # Always broadcast position updates so frontend shows live P/L
+                await connection_manager.broadcast({
+                    "type": "position_updated",
+                    "data": position_to_dict(pos),
+                    "timestamp": now.isoformat(),
+                })
+
+                # Broadcast exit signal if triggered
+                if exit_signal:
+                    logger.info(
+                        f"EXIT SIGNAL: {pos.underlying} ${pos.strike}{pos.right} - {exit_signal.reason}"
+                    )
+                    await connection_manager.broadcast({
+                        "type": "exit_signal",
+                        "data": exit_signal_to_dict(exit_signal, pos),
+                        "timestamp": now.isoformat(),
+                    })
 
             # Always broadcast session stats after evaluation cycle
             await connection_manager.broadcast({
@@ -1300,6 +1404,38 @@ async def close_position(position_id: str, request: ClosePositionRequest) -> dic
     await connection_manager.broadcast({
         "type": "session_status",
         "data": session_stats_to_dict(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+    return {"position": position_to_dict(position)}
+
+
+@app.post("/api/positions/{position_id}/dismiss-exit-signal")
+async def dismiss_exit_signal(position_id: str) -> dict[str, Any]:
+    """Dismiss an exit signal for a position (keep position open).
+
+    This allows the user to acknowledge the exit signal but choose to hold.
+    The position returns to 'open' status and exit signals can trigger again.
+
+    Args:
+        position_id: ID of position with exit signal to dismiss
+
+    Returns:
+        The updated position
+    """
+    success = position_tracker.clear_exit_signal(position_id)
+
+    if not success:
+        return {"error": f"Position not found or no exit signal: {position_id}"}
+
+    position = position_tracker.get_position(position_id)
+    if not position:
+        return {"error": f"Position not found: {position_id}"}
+
+    # Broadcast position update
+    await connection_manager.broadcast({
+        "type": "position_updated",
+        "data": position_to_dict(position),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
 

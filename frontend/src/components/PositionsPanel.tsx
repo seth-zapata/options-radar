@@ -4,9 +4,20 @@
 
 import { useState } from 'react';
 import { useOptionsStore } from '../store/optionsStore';
-import type { TrackedPosition } from '../types';
+import type { TrackedPosition, ExitSignal } from '../types';
 
 const API_BASE = 'http://localhost:8000';
+
+function getUrgencyColors(urgency: ExitSignal['urgency']) {
+  switch (urgency) {
+    case 'high':
+      return 'bg-red-600 text-white border-red-700';
+    case 'medium':
+      return 'bg-amber-500 text-white border-amber-600';
+    case 'low':
+      return 'bg-yellow-400 text-yellow-900 border-yellow-500';
+  }
+}
 
 function formatAction(action: string): string {
   switch (action) {
@@ -29,13 +40,37 @@ function formatTimeAgo(isoString: string): string {
   return `${Math.floor(seconds / 86400)}d ago`;
 }
 
-function PositionCard({ position }: { position: TrackedPosition }) {
+function PositionCard({ position, exitSignal }: { position: TrackedPosition; exitSignal?: ExitSignal }) {
   const [showCloseModal, setShowCloseModal] = useState(false);
   const [closePrice, setClosePrice] = useState('');
   const [closing, setClosing] = useState(false);
+  const [dismissing, setDismissing] = useState(false);
+  const clearExitSignal = useOptionsStore((state) => state.clearExitSignal);
 
   const pnlColor = position.pnl >= 0 ? 'text-green-600' : 'text-red-600';
   const pnlBgColor = position.pnl >= 0 ? 'bg-green-50' : 'bg-red-50';
+  const hasExitSignal = position.status === 'exit_signal' && exitSignal;
+
+  const handleDismissSignal = async () => {
+    setDismissing(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/positions/${position.id}/dismiss-exit-signal`, {
+        method: 'POST',
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || 'Failed to dismiss signal');
+      }
+
+      clearExitSignal(position.id);
+    } catch (error) {
+      console.error('Error dismissing signal:', error);
+      alert(error instanceof Error ? error.message : 'Failed to dismiss signal');
+    } finally {
+      setDismissing(false);
+    }
+  };
 
   const handleClose = async () => {
     const price = parseFloat(closePrice);
@@ -67,9 +102,15 @@ function PositionCard({ position }: { position: TrackedPosition }) {
   };
 
   return (
-    <div className={`rounded-lg border overflow-hidden ${position.status === 'open' ? 'border-slate-200' : 'border-slate-100 opacity-60'}`}>
+    <div className={`rounded-lg border-2 overflow-hidden ${
+      hasExitSignal ? 'border-red-400 ring-2 ring-red-200' :
+      position.status === 'open' ? 'border-slate-200' : 'border-slate-100 opacity-60'
+    }`}>
       {/* Header */}
-      <div className={`px-3 py-2 flex items-center justify-between ${position.status === 'open' ? 'bg-slate-100' : 'bg-slate-50'}`}>
+      <div className={`px-3 py-2 flex items-center justify-between ${
+        hasExitSignal ? 'bg-red-100' :
+        position.status === 'open' ? 'bg-slate-100' : 'bg-slate-50'
+      }`}>
         <div className="flex items-center gap-2">
           <span className="font-bold">{position.underlying}</span>
           <span className={`text-xs px-1.5 py-0.5 rounded ${
@@ -117,19 +158,29 @@ function PositionCard({ position }: { position: TrackedPosition }) {
           </div>
         </div>
 
+        {/* Exit Signal Banner */}
+        {hasExitSignal && exitSignal && (
+          <div className={`mt-2 p-2 rounded border ${getUrgencyColors(exitSignal.urgency)}`}>
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-sm">EXIT SIGNAL</span>
+              <span className="text-xs uppercase">{exitSignal.urgency} urgency</span>
+            </div>
+            <div className="text-sm mt-1">{exitSignal.reason}</div>
+          </div>
+        )}
+
         {/* DTE and Delta */}
-        {position.status === 'open' && (
+        {(position.status === 'open' || hasExitSignal) && (
           <div className="flex justify-between text-xs text-slate-500 mt-2">
             <span>{position.dte !== null ? `${position.dte} DTE` : ''}</span>
             <span>{position.delta !== null ? `Delta: ${position.delta.toFixed(2)}` : ''}</span>
           </div>
         )}
 
-        {/* Close Button */}
+        {/* Close Button - for open positions */}
         {position.status === 'open' && (
           <button
             onClick={() => {
-              // Auto-fill with current price when opening modal
               if (position.currentPrice) {
                 setClosePrice(position.currentPrice.toFixed(2));
               }
@@ -139,6 +190,30 @@ function PositionCard({ position }: { position: TrackedPosition }) {
           >
             Close Position
           </button>
+        )}
+
+        {/* Exit Signal Actions */}
+        {hasExitSignal && (
+          <div className="flex gap-2 mt-2">
+            <button
+              onClick={() => {
+                if (position.currentPrice) {
+                  setClosePrice(position.currentPrice.toFixed(2));
+                }
+                setShowCloseModal(true);
+              }}
+              className="flex-1 py-1.5 bg-red-600 hover:bg-red-700 rounded text-sm font-bold text-white"
+            >
+              Close Now
+            </button>
+            <button
+              onClick={handleDismissSignal}
+              disabled={dismissing}
+              className="flex-1 py-1.5 bg-slate-200 hover:bg-slate-300 rounded text-sm font-medium text-slate-700 disabled:opacity-50"
+            >
+              {dismissing ? 'Dismissing...' : 'Dismiss'}
+            </button>
+          </div>
         )}
 
         {/* Closed Status */}
@@ -199,21 +274,26 @@ function PositionCard({ position }: { position: TrackedPosition }) {
 
 export function PositionsPanel() {
   const positions = useOptionsStore((state) => state.positions);
+  const exitSignals = useOptionsStore((state) => state.exitSignals);
   const [showClosed, setShowClosed] = useState(false);
 
-  const openPositions = positions.filter(p => p.status === 'open');
+  // Positions with exit signals + open positions (exit_signal positions are still active)
+  const activePositions = positions.filter(p => p.status === 'open' || p.status === 'exit_signal');
   const closedPositions = positions.filter(p => p.status === 'closed');
+
+  // Create a map of positionId -> ExitSignal for quick lookup
+  const exitSignalMap = new Map(exitSignals.map(s => [s.positionId, s]));
 
   // Calculate totals
   const totalPnl = positions.reduce((sum, p) => sum + p.pnl, 0);
-  const totalExposure = openPositions.reduce((sum, p) => sum + p.entryCost, 0);
+  const totalExposure = activePositions.reduce((sum, p) => sum + p.entryCost, 0);
 
   return (
     <div className="bg-white rounded-lg shadow overflow-hidden">
       <div className="px-4 py-3 bg-green-600 text-white">
         <h2 className="font-bold text-lg">Positions</h2>
         <p className="text-sm text-green-200">
-          {openPositions.length} open • {closedPositions.length} closed
+          {activePositions.length} active • {closedPositions.length} closed
         </p>
       </div>
 
@@ -234,11 +314,15 @@ export function PositionsPanel() {
           </div>
         </div>
 
-        {/* Open Positions */}
-        {openPositions.length > 0 ? (
+        {/* Active Positions (open + exit_signal) */}
+        {activePositions.length > 0 ? (
           <div className="space-y-2">
-            {openPositions.map((pos) => (
-              <PositionCard key={pos.id} position={pos} />
+            {activePositions.map((pos) => (
+              <PositionCard
+                key={pos.id}
+                position={pos}
+                exitSignal={exitSignalMap.get(pos.id)}
+              />
             ))}
           </div>
         ) : (

@@ -277,7 +277,7 @@ class GatingPipeline:
             return stage_result
 
         # Stage 7: Explain (all gates passed)
-        confidence_cap = self._calculate_confidence_cap(soft_failures, all_results)
+        confidence_cap = self._calculate_confidence_cap(soft_failures, all_results, sentiment)
 
         return PipelineResult(
             passed=True,
@@ -544,11 +544,13 @@ class GatingPipeline:
         self,
         soft_failures: list[GateResult],
         all_results: list[GateResult],
+        sentiment: CombinedSentiment | None = None,
     ) -> int:
         """Calculate maximum confidence based on soft failures and boost gates.
 
         Each soft failure reduces confidence.
         Boost gates (fresh sentiment, high mentions) increase confidence.
+        Three-source alignment (News + WSB + Social) modifies confidence.
         """
         base_confidence = 100
 
@@ -590,6 +592,17 @@ class GatingPipeline:
                     # Both positive or both negative = strong alignment
                     if (news > 20 and wsb > 20) or (news < -20 and wsb < -20):
                         base_confidence += 10
+
+        # Apply three-source alignment modifier (Finnhub Social)
+        # +10 if THREE_ALIGNED, -5 if SOCIAL_DIVERGENCE
+        if sentiment:
+            modifier = sentiment.confidence_modifier
+            if modifier != 0:
+                base_confidence += modifier
+                logger.debug(
+                    f"Applied {modifier:+d} confidence modifier "
+                    f"[{sentiment.alignment_tag}]"
+                )
 
         return max(0, min(100, base_confidence))
 
