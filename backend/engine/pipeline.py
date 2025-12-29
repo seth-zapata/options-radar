@@ -20,6 +20,7 @@ from enum import Enum
 from typing import Literal
 
 from backend.data.aggregator import AggregatedOptionData
+from backend.data.eodhd_client import OptionsIndicators
 from backend.data.sentiment_aggregator import CombinedSentiment
 from backend.data.technicals import TechnicalIndicators
 from backend.engine.gates import (
@@ -188,6 +189,7 @@ class GatingPipeline:
         portfolio: PortfolioState | None = None,
         sentiment: CombinedSentiment | None = None,
         technicals: TechnicalIndicators | None = None,
+        options_indicators: OptionsIndicators | None = None,
     ) -> PipelineResult:
         """Run the full gating pipeline for an option.
 
@@ -199,6 +201,7 @@ class GatingPipeline:
             portfolio: Current portfolio state
             sentiment: Combined sentiment data from news + WSB
             technicals: Technical indicators (RSI, SMA, volume)
+            options_indicators: Options flow indicators (P/C Ratio, Max Pain) from EODHD
 
         Returns:
             PipelineResult with pass/fail and details
@@ -283,7 +286,7 @@ class GatingPipeline:
         # Determine if signal is bullish for technical alignment
         is_bullish = action in ("BUY_CALL", "SELL_PUT")
         confidence_cap = self._calculate_confidence_cap(
-            soft_failures, all_results, sentiment, technicals, is_bullish
+            soft_failures, all_results, sentiment, technicals, is_bullish, options_indicators
         )
 
         return PipelineResult(
@@ -554,6 +557,7 @@ class GatingPipeline:
         sentiment: CombinedSentiment | None = None,
         technicals: TechnicalIndicators | None = None,
         is_bullish: bool = True,
+        options_indicators: OptionsIndicators | None = None,
     ) -> int:
         """Calculate maximum confidence based on soft failures and boost gates.
 
@@ -561,6 +565,7 @@ class GatingPipeline:
         Boost gates (fresh sentiment, high mentions) increase confidence.
         Three-source alignment (News + WSB + Social) modifies confidence.
         Technical indicators (RSI, SMA, Volume) modify confidence based on alignment.
+        Options indicators (P/C Ratio) modify confidence based on contrarian alignment.
         """
         base_confidence = 100
 
@@ -631,6 +636,18 @@ class GatingPipeline:
                     f"Trend={technicals.trend_signal}]"
                 )
 
+        # Apply options indicators modifier (P/C Ratio)
+        # +5 when P/C ratio is contrarian aligned (high P/C + bullish OR low P/C + bearish)
+        if options_indicators:
+            options_modifier = options_indicators.get_directional_modifier(is_bullish)
+            if options_modifier != 0:
+                base_confidence += options_modifier
+                logger.info(
+                    f"Applied {options_modifier:+d} P/C Ratio modifier "
+                    f"[P/C={options_indicators.put_call_ratio:.2f if options_indicators.put_call_ratio else 'N/A'}, "
+                    f"Signal={options_indicators.pcr_signal}]"
+                )
+
         return max(0, min(100, base_confidence))
 
 
@@ -642,6 +659,7 @@ def evaluate_option_for_signal(
     portfolio: PortfolioState | None = None,
     sentiment: CombinedSentiment | None = None,
     technicals: TechnicalIndicators | None = None,
+    options_indicators: OptionsIndicators | None = None,
 ) -> PipelineResult:
     """Convenience function to evaluate an option through the pipeline.
 
@@ -653,11 +671,12 @@ def evaluate_option_for_signal(
         portfolio: Portfolio state
         sentiment: Combined sentiment data from news + WSB
         technicals: Technical indicators (RSI, SMA, volume)
+        options_indicators: Options flow indicators (P/C Ratio, Max Pain) from EODHD
 
     Returns:
         PipelineResult
     """
     pipeline = GatingPipeline()
     return pipeline.evaluate(
-        option, underlying, action, contracts, portfolio, sentiment, technicals
+        option, underlying, action, contracts, portfolio, sentiment, technicals, options_indicators
     )

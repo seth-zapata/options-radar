@@ -64,6 +64,14 @@ class QuiverConfig:
 
 
 @dataclass(frozen=True)
+class EODHDConfig:
+    """EODHD API configuration for historical options data."""
+
+    api_key: str
+    base_url: str = "https://eodhd.com/api"  # Marketplace API at /mp/unicornbay/options
+
+
+@dataclass(frozen=True)
 class SignalQualityConfig:
     """Signal quality filter configuration.
 
@@ -110,6 +118,7 @@ class AppConfig:
     orats: ORATSConfig
     finnhub: FinnhubConfig
     quiver: QuiverConfig
+    eodhd: EODHDConfig
     log_level: str
 
     # Watchlist - expanded with WSB favorites
@@ -178,6 +187,9 @@ def load_config() -> AppConfig:
         ),
         quiver=QuiverConfig(
             api_key=os.getenv("QUIVER_API_KEY", ""),
+        ),
+        eodhd=EODHDConfig(
+            api_key=os.getenv("EODHD_API_KEY", ""),
         ),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
     )

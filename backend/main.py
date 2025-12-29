@@ -27,7 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from backend.config import load_config
-from backend.data import AlpacaAccountClient, AlpacaOptionsClient, DataAggregator, MockDataGenerator, ORATSClient, SubscriptionManager
+from backend.data import AlpacaAccountClient, AlpacaOptionsClient, AlpacaRestClient, DataAggregator, EODHDClient, MockDataGenerator, OptionsIndicators, ORATSClient, SubscriptionManager
 from backend.data.aggregator import AggregatedOptionData
 from backend.engine import (
     ExitSignal,
@@ -66,8 +66,15 @@ logger = logging.getLogger(__name__)
 connection_manager = ConnectionManager()
 aggregator: DataAggregator | None = None
 alpaca_client: AlpacaOptionsClient | None = None
+alpaca_rest_client: AlpacaRestClient | None = None  # For options chain OI (live trading)
 orats_client: ORATSClient | None = None
+eodhd_client: EODHDClient | None = None  # For historical backtesting only
 subscription_manager: SubscriptionManager | None = None
+
+# Options indicators cache (symbol -> (indicators, timestamp))
+# Cache for 1 hour since options OI data is from EOD
+_options_indicators_cache: dict[str, tuple[OptionsIndicators | None, float]] = {}
+OPTIONS_CACHE_TTL = 3600.0  # 1 hour
 
 # Multi-symbol mock mode support
 # Dictionary of symbol -> MockDataGenerator for all watchlist symbols
@@ -94,6 +101,77 @@ SYMBOL_COOLDOWN = 300.0  # Don't recommend same underlying within 5 minutes (mat
 
 # Background tasks
 _background_tasks: set[asyncio.Task] = set()
+
+
+async def get_options_indicators(symbol: str) -> OptionsIndicators | None:
+    """Get options indicators (P/C Ratio, Max Pain) for a symbol with caching.
+
+    For live trading: Uses Alpaca Trading API to fetch options chain OI
+    For backtesting: Uses EODHD for historical data (handled in run_backtest.py)
+
+    Results are cached for 1 hour since options OI is typically EOD data.
+
+    Args:
+        symbol: Stock symbol (e.g., "TSLA")
+
+    Returns:
+        OptionsIndicators or None if unavailable
+    """
+    global alpaca_rest_client
+
+    if alpaca_rest_client is None:
+        return None
+
+    import time
+    from datetime import datetime, timezone
+    now = time.time()
+
+    # Check cache
+    if symbol in _options_indicators_cache:
+        cached, cached_time = _options_indicators_cache[symbol]
+        if now - cached_time < OPTIONS_CACHE_TTL:
+            return cached
+
+    # Fetch fresh data from Alpaca
+    try:
+        chain_data = await alpaca_rest_client.get_options_chain_oi(symbol)
+
+        # Convert to OptionsIndicators format
+        put_call_ratio = chain_data.get("put_call_ratio")
+
+        # Determine P/C signal
+        pcr_signal = None
+        if put_call_ratio is not None:
+            if put_call_ratio > 1.2:
+                pcr_signal = "bullish"  # Contrarian: excessive bearishness
+            elif put_call_ratio < 0.6:
+                pcr_signal = "bearish"  # Contrarian: excessive bullishness
+            else:
+                pcr_signal = "neutral"
+
+        indicators = OptionsIndicators(
+            symbol=symbol,
+            date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            put_call_ratio=put_call_ratio,
+            max_pain=None,  # Max Pain not calculated from Alpaca (requires full chain analysis)
+            total_call_oi=chain_data.get("total_call_oi", 0),
+            total_put_oi=chain_data.get("total_put_oi", 0),
+            num_contracts=chain_data.get("num_contracts", 0),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+
+        _options_indicators_cache[symbol] = (indicators, now)
+
+        logger.info(
+            f"Alpaca {symbol}: P/C={put_call_ratio:.2f if put_call_ratio else 'N/A'} "
+            f"({pcr_signal}), {chain_data.get('num_contracts', 0)} contracts"
+        )
+        return indicators
+
+    except Exception as e:
+        logger.warning(f"Failed to fetch options indicators for {symbol}: {e}")
+        _options_indicators_cache[symbol] = (None, now)
+        return None
 
 
 def option_to_dict(option: AggregatedOptionData) -> dict[str, Any]:
@@ -411,6 +489,9 @@ async def gate_evaluation_loop() -> None:
                 except Exception as e:
                     logger.debug(f"Error fetching sentiment for {symbol}: {e}")
 
+                # Fetch options indicators (P/C Ratio, Max Pain) for this symbol
+                options_ind = await get_options_indicators(symbol)
+
                 # Filter to calls only for BUY_CALL evaluation
                 # Get options within reasonable strike range (ATM +/- 5 strikes)
                 atm_strike = round(underlying.price / 2.5) * 2.5
@@ -439,12 +520,13 @@ async def gate_evaluation_loop() -> None:
                     # Score the option
                     score, confidence = score_option_candidate(option, underlying)
 
-                    # Evaluate gates with sentiment data
+                    # Evaluate gates with sentiment data and options indicators
                     result = evaluate_option_for_signal(
                         option=option,
                         underlying=underlying,
                         action="BUY_CALL",
                         sentiment=sentiment,
+                        options_indicators=options_ind,
                     )
 
                     if result.passed and score > best_score:
@@ -465,6 +547,7 @@ async def gate_evaluation_loop() -> None:
                             underlying=underlying,
                             action="BUY_CALL",
                             sentiment=sentiment,
+                            options_indicators=options_ind,
                         )
                         display_option = atm_option
                     else:
@@ -494,6 +577,8 @@ async def gate_evaluation_loop() -> None:
                                 "expiry": display_option.canonical_id.expiry,
                                 "premium": display_option.mid,
                             },
+                            # Options flow indicators (Max Pain, P/C Ratio)
+                            "optionsIndicators": options_ind.to_dict() if options_ind else None,
                         },
                         "timestamp": now.isoformat(),
                     })
@@ -929,6 +1014,12 @@ async def lifespan(app: FastAPI):
         orats_client = ORATSClient(config=config.orats)
         await orats_client.__aenter__()
 
+    # Initialize Alpaca REST client for options chain OI (P/C Ratio)
+    # Uses Alpaca Trading API which has OI data - no EODHD quota burned
+    # EODHD is now only used for historical backtesting (in run_backtest.py)
+    alpaca_rest_client = AlpacaRestClient(config=config.alpaca)
+    logger.info("Alpaca REST client initialized for options chain OI (P/C Ratio)")
+
     # Connect to Alpaca
     await alpaca_client.connect()
 
@@ -1169,6 +1260,9 @@ async def evaluate_gates(symbol: str) -> dict[str, Any]:
     except Exception as e:
         logger.debug(f"Error fetching sentiment for {symbol}: {e}")
 
+    # Fetch options indicators for this symbol
+    options_ind = await get_options_indicators(symbol)
+
     results = []
     for option in options[:5]:  # Limit for demo
         result = evaluate_option_for_signal(
@@ -1176,6 +1270,7 @@ async def evaluate_gates(symbol: str) -> dict[str, Any]:
             underlying=underlying,
             action="BUY_CALL" if option.canonical_id.right == "C" else "BUY_PUT",
             sentiment=sentiment,
+            options_indicators=options_ind,
         )
 
         gate_results = [
@@ -1745,6 +1840,30 @@ async def get_symbol_sentiment(symbol: str) -> dict[str, Any]:
         return {"error": "Sentiment aggregator not configured"}
     except Exception as e:
         logger.error(f"Error fetching sentiment for {symbol}: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/scanner/options-indicators/{symbol}")
+async def get_symbol_options_indicators(symbol: str) -> dict[str, Any]:
+    """Get options flow indicators (P/C Ratio, Max Pain) for a symbol.
+
+    Args:
+        symbol: Stock symbol (e.g., "TSLA")
+
+    Returns:
+        Options indicators including P/C Ratio, Max Pain, and open interest
+    """
+    try:
+        indicators = await get_options_indicators(symbol)
+        if indicators:
+            return {
+                "symbol": symbol,
+                "indicators": indicators.to_dict(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        return {"error": f"No options data available for {symbol}"}
+    except Exception as e:
+        logger.error(f"Error fetching options indicators for {symbol}: {e}")
         return {"error": str(e)}
 
 

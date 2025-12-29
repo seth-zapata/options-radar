@@ -314,3 +314,122 @@ class AlpacaRestClient:
         except Exception as e:
             logger.error(f"Error fetching price at time for {symbol}: {e}")
             return None
+
+    async def _trading_request(
+        self,
+        endpoint: str,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        """Make authenticated request to Alpaca Trading API (for options contracts)."""
+        await self._rate_limit()
+
+        url = f"{self.config.base_url}/{endpoint}"
+        headers = {
+            "APCA-API-KEY-ID": self.config.api_key,
+            "APCA-API-SECRET-KEY": self.config.secret_key,
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, params=params) as response:
+                if response.status == 401:
+                    logger.error("Alpaca API authentication failed")
+                    raise Exception("Authentication failed")
+
+                if response.status == 429:
+                    logger.warning("Alpaca rate limit hit")
+                    raise Exception("Rate limit exceeded")
+
+                if response.status != 200:
+                    text = await response.text()
+                    logger.error(f"Alpaca Trading API error: {response.status} - {text}")
+                    raise Exception(f"API error: {response.status}")
+
+                return await response.json()
+
+    async def get_options_chain_oi(
+        self,
+        underlying: str,
+    ) -> dict[str, Any]:
+        """Get options chain with open interest for an underlying.
+
+        Uses Alpaca Trading API's /v2/options/contracts endpoint which includes
+        open_interest for each contract.
+
+        Args:
+            underlying: Stock symbol (e.g., "TSLA")
+
+        Returns:
+            Dict with total_call_oi, total_put_oi, put_call_ratio, contracts
+        """
+        try:
+            # Fetch all active contracts for the underlying
+            all_contracts = []
+            page_token = None
+
+            while True:
+                params: dict[str, Any] = {
+                    "underlying_symbols": underlying,
+                    "status": "active",
+                    "limit": 100,
+                }
+                if page_token:
+                    params["page_token"] = page_token
+
+                data = await self._trading_request("v2/options/contracts", params)
+
+                if not data or "option_contracts" not in data:
+                    break
+
+                contracts = data.get("option_contracts", [])
+                all_contracts.extend(contracts)
+
+                page_token = data.get("next_page_token")
+                if not page_token or len(contracts) < 100:
+                    break
+
+                # Limit to 1000 contracts to avoid excessive API calls
+                if len(all_contracts) >= 1000:
+                    logger.warning(f"Truncating options chain for {underlying} at 1000 contracts")
+                    break
+
+            # Calculate totals
+            total_call_oi = 0
+            total_put_oi = 0
+
+            for contract in all_contracts:
+                oi = int(contract.get("open_interest", 0) or 0)
+                contract_type = contract.get("type", "").lower()
+
+                if contract_type == "call":
+                    total_call_oi += oi
+                elif contract_type == "put":
+                    total_put_oi += oi
+
+            # Calculate P/C ratio
+            put_call_ratio = None
+            if total_call_oi > 0:
+                put_call_ratio = total_put_oi / total_call_oi
+
+            logger.info(
+                f"Alpaca options chain for {underlying}: {len(all_contracts)} contracts, "
+                f"call_oi={total_call_oi}, put_oi={total_put_oi}, "
+                f"P/C={put_call_ratio:.3f if put_call_ratio else 'N/A'}"
+            )
+
+            return {
+                "symbol": underlying,
+                "total_call_oi": total_call_oi,
+                "total_put_oi": total_put_oi,
+                "put_call_ratio": put_call_ratio,
+                "num_contracts": len(all_contracts),
+            }
+
+        except Exception as e:
+            logger.error(f"Error fetching options chain OI for {underlying}: {e}")
+            return {
+                "symbol": underlying,
+                "total_call_oi": 0,
+                "total_put_oi": 0,
+                "put_call_ratio": None,
+                "num_contracts": 0,
+            }

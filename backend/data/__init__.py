@@ -8,6 +8,13 @@ from backend.data.alpaca_account import (
     Position,
 )
 from backend.data.alpaca_client import AlpacaOptionsClient, ConnectionState
+from backend.data.alpaca_rest import AlpacaRestClient, BarData, LatestQuote
+from backend.data.eodhd_client import (
+    EODHDClient,
+    OptionContract,
+    OptionsChain,
+    OptionsIndicators,
+)
 from backend.data.finnhub_client import FinnhubClient, NewsSentiment, CompanyNews, SocialSentiment
 from backend.data.market_hours import MarketStatus, check_market_hours, CT, ET
 from backend.data.mock_data import MockDataGenerator
@@ -33,6 +40,9 @@ from backend.data.subscription_manager import SubscriptionManager
 from backend.data.technicals import (
     TechnicalAnalyzer,
     TechnicalIndicators,
+    calculate_bollinger_bands,
+    calculate_ema,
+    calculate_macd,
     calculate_rsi,
     calculate_sma,
 )
@@ -42,20 +52,27 @@ __all__ = [
     "AggregatedOptionData",
     "AlpacaAccountClient",
     "AlpacaOptionsClient",
+    "AlpacaRestClient",
+    "BarData",
     "CombinedSentiment",
     "CompanyNews",
     "CongressTrade",
     "ConnectionState",
     "CT",
     "DataAggregator",
+    "EODHDClient",
     "ET",
     "FinnhubClient",
     "FreshnessLevel",
     "FreshnessReport",
     "InsiderTrade",
+    "LatestQuote",
     "MarketStatus",
     "MockDataGenerator",
     "NewsSentiment",
+    "OptionContract",
+    "OptionsChain",
+    "OptionsIndicators",
     "ORATSClient",
     "PoliticalSentiment",
     "PortfolioSummary",
@@ -69,6 +86,9 @@ __all__ = [
     "TechnicalAnalyzer",
     "TechnicalIndicators",
     "WSBSentiment",
+    "calculate_bollinger_bands",
+    "calculate_ema",
+    "calculate_macd",
     "calculate_rsi",
     "calculate_sma",
     "check_market_hours",
