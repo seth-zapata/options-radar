@@ -2,17 +2,26 @@
 
 Tracks positions the user confirms they took, with actual fill prices.
 Generates exit signals based on P/L, time decay, and delta changes.
+
+Positions are persisted to SQLite so they survive server restarts.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import sqlite3
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal
 
 logger = logging.getLogger(__name__)
+
+# Default database path
+DEFAULT_DB_PATH = Path(__file__).parent.parent.parent / "cache" / "positions.db"
 
 
 @dataclass
@@ -146,6 +155,8 @@ class PositionTrackerConfig:
 class PositionTracker:
     """Tracks confirmed paper positions and generates exit signals.
 
+    Positions are persisted to SQLite so they survive server restarts.
+
     Usage:
         tracker = PositionTracker()
 
@@ -168,12 +179,139 @@ class PositionTracker:
         tracker.close_position(position_id, close_price=5.50)
     """
 
-    def __init__(self, config: PositionTrackerConfig | None = None):
+    def __init__(self, config: PositionTrackerConfig | None = None, db_path: Path | None = None):
         self.config = config or PositionTrackerConfig()
         self._positions: dict[str, TrackedPosition] = {}
         self._symbol_stats: dict[str, SymbolStats] = {}
+        self._db_path = db_path or DEFAULT_DB_PATH
 
-        logger.info("Position tracker initialized")
+        # Initialize database and load existing positions
+        self._init_db()
+        self._load_from_db()
+
+        logger.info(f"Position tracker initialized (db: {self._db_path}, loaded {len(self._positions)} positions)")
+
+    def _init_db(self) -> None:
+        """Initialize SQLite database with positions table."""
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS positions (
+                    id TEXT PRIMARY KEY,
+                    recommendation_id TEXT,
+                    opened_at TEXT,
+                    underlying TEXT,
+                    expiry TEXT,
+                    strike REAL,
+                    right TEXT,
+                    action TEXT,
+                    contracts INTEGER,
+                    fill_price REAL,
+                    entry_cost REAL,
+                    current_price REAL,
+                    current_value REAL,
+                    pnl REAL,
+                    pnl_percent REAL,
+                    dte INTEGER,
+                    delta REAL,
+                    status TEXT,
+                    exit_reason TEXT,
+                    closed_at TEXT,
+                    close_price REAL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS symbol_stats (
+                    symbol TEXT PRIMARY KEY,
+                    trades INTEGER,
+                    wins INTEGER,
+                    losses INTEGER,
+                    total_pnl_dollars REAL,
+                    total_pnl_percent REAL
+                )
+            """)
+            conn.commit()
+
+    def _load_from_db(self) -> None:
+        """Load positions and symbol stats from database."""
+        with sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+
+            # Load positions
+            cursor = conn.execute("SELECT * FROM positions")
+            for row in cursor:
+                position = TrackedPosition(
+                    id=row["id"],
+                    recommendation_id=row["recommendation_id"],
+                    opened_at=row["opened_at"],
+                    underlying=row["underlying"],
+                    expiry=row["expiry"],
+                    strike=row["strike"],
+                    right=row["right"],
+                    action=row["action"],
+                    contracts=row["contracts"],
+                    fill_price=row["fill_price"],
+                    entry_cost=row["entry_cost"],
+                    current_price=row["current_price"],
+                    current_value=row["current_value"],
+                    pnl=row["pnl"] or 0.0,
+                    pnl_percent=row["pnl_percent"] or 0.0,
+                    dte=row["dte"],
+                    delta=row["delta"],
+                    status=row["status"] or "open",
+                    exit_reason=row["exit_reason"],
+                    closed_at=row["closed_at"],
+                    close_price=row["close_price"],
+                )
+                self._positions[position.id] = position
+
+            # Load symbol stats
+            cursor = conn.execute("SELECT * FROM symbol_stats")
+            for row in cursor:
+                stats = SymbolStats(
+                    symbol=row["symbol"],
+                    trades=row["trades"],
+                    wins=row["wins"],
+                    losses=row["losses"],
+                    total_pnl_dollars=row["total_pnl_dollars"],
+                    total_pnl_percent=row["total_pnl_percent"],
+                )
+                self._symbol_stats[stats.symbol] = stats
+
+    def _save_position(self, position: TrackedPosition) -> None:
+        """Save or update a position in the database."""
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO positions (
+                    id, recommendation_id, opened_at, underlying, expiry, strike,
+                    right, action, contracts, fill_price, entry_cost, current_price,
+                    current_value, pnl, pnl_percent, dte, delta, status,
+                    exit_reason, closed_at, close_price
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                position.id, position.recommendation_id, position.opened_at,
+                position.underlying, position.expiry, position.strike,
+                position.right, position.action, position.contracts,
+                position.fill_price, position.entry_cost, position.current_price,
+                position.current_value, position.pnl, position.pnl_percent,
+                position.dte, position.delta, position.status,
+                position.exit_reason, position.closed_at, position.close_price,
+            ))
+            conn.commit()
+
+    def _save_symbol_stats(self, stats: SymbolStats) -> None:
+        """Save or update symbol stats in the database."""
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO symbol_stats (
+                    symbol, trades, wins, losses, total_pnl_dollars, total_pnl_percent
+                ) VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                stats.symbol, stats.trades, stats.wins, stats.losses,
+                stats.total_pnl_dollars, stats.total_pnl_percent,
+            ))
+            conn.commit()
 
     def open_position(
         self,
@@ -226,6 +364,9 @@ class PositionTracker:
         )
 
         self._positions[position_id] = position
+
+        # Persist to database
+        self._save_position(position)
 
         logger.info(
             f"Position opened: {action} {underlying} ${strike}{right} "
@@ -281,6 +422,9 @@ class PositionTracker:
         # Update per-symbol stats
         self._update_symbol_stats(position)
 
+        # Persist to database
+        self._save_position(position)
+
         return position
 
     def _update_symbol_stats(self, position: TrackedPosition) -> None:
@@ -299,6 +443,9 @@ class PositionTracker:
             stats.wins += 1
         else:
             stats.losses += 1
+
+        # Persist symbol stats to database
+        self._save_symbol_stats(stats)
 
         logger.info(
             f"[SYMBOL_STATS] {symbol}: {stats.trades} trades, "
@@ -353,8 +500,12 @@ class PositionTracker:
             if exit_signal:
                 position.status = "exit_signal"
                 position.exit_reason = exit_signal.reason
+                # Persist exit signal status to database
+                self._save_position(position)
                 return exit_signal
 
+        # Persist updated position data (price, pnl, etc.)
+        self._save_position(position)
         return None
 
     def _check_exit_signals(
@@ -447,15 +598,24 @@ class PositionTracker:
         if position.status == "exit_signal":
             position.status = "open"
             position.exit_reason = None
+            # Persist the update to database
+            self._save_position(position)
             logger.info(f"Exit signal dismissed for {position.underlying} ${position.strike}")
             return True
 
         return False
 
+    def _delete_position(self, position_id: str) -> None:
+        """Delete a position from the database."""
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute("DELETE FROM positions WHERE id = ?", (position_id,))
+            conn.commit()
+
     def clear_closed_positions(self) -> int:
         """Remove closed positions from tracking. Returns count removed."""
         closed_ids = [p.id for p in self._positions.values() if p.status == "closed"]
         for pid in closed_ids:
+            self._delete_position(pid)
             del self._positions[pid]
         return len(closed_ids)
 

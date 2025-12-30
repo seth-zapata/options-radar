@@ -274,6 +274,81 @@ function CompactSignalRow({ signal, isConfirmed, onTakeTrade }: {
   );
 }
 
+// Trade History Component
+function TradeHistory({ positions }: { positions: TrackedPosition[] }) {
+  // Get closed TSLA positions, sorted by most recent first
+  const closedPositions = positions
+    .filter(p => p.underlying === 'TSLA' && p.status === 'closed')
+    .sort((a, b) => {
+      if (!a.closedAt || !b.closedAt) return 0;
+      return new Date(b.closedAt).getTime() - new Date(a.closedAt).getTime();
+    });
+
+  // Calculate stats
+  const wins = closedPositions.filter(p => p.pnl > 0).length;
+  const losses = closedPositions.filter(p => p.pnl <= 0).length;
+  const totalPnl = closedPositions.reduce((sum, p) => sum + p.pnl, 0);
+  const winRate = closedPositions.length > 0 ? (wins / closedPositions.length) * 100 : null;
+
+  if (closedPositions.length === 0) {
+    return null; // Don't show section if no closed trades
+  }
+
+  return (
+    <div className="bg-white rounded-lg shadow overflow-hidden">
+      <div className="px-4 py-3 bg-indigo-600 text-white flex items-center justify-between">
+        <div>
+          <h3 className="font-bold">Trade History</h3>
+          <p className="text-sm text-indigo-200">{closedPositions.length} closed trade{closedPositions.length !== 1 ? 's' : ''}</p>
+        </div>
+        <div className="text-right">
+          <div className={`text-lg font-bold ${totalPnl >= 0 ? 'text-green-300' : 'text-red-300'}`}>
+            {totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(0)}
+          </div>
+          <div className="text-xs text-indigo-200">
+            {wins}W / {losses}L {winRate !== null && `(${winRate.toFixed(0)}%)`}
+          </div>
+        </div>
+      </div>
+      <div className="divide-y divide-slate-100">
+        {closedPositions.slice(0, 5).map((position) => (
+          <div key={position.id} className="px-4 py-3 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <span className={`w-2 h-2 rounded-full ${position.pnl > 0 ? 'bg-green-500' : 'bg-red-500'}`}></span>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                    position.action.includes('CALL') ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+                  }`}>
+                    {formatAction(position.action)}
+                  </span>
+                  <span className="font-mono text-sm">${position.strike} {position.right === 'C' ? 'Call' : 'Put'}</span>
+                </div>
+                <div className="text-xs text-slate-500 mt-0.5">
+                  Entry: ${position.fillPrice.toFixed(2)} → Exit: ${position.closePrice?.toFixed(2) || '-'}
+                </div>
+              </div>
+            </div>
+            <div className="text-right">
+              <div className={`font-bold ${position.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                {position.pnl >= 0 ? '+' : ''}${position.pnl.toFixed(0)}
+              </div>
+              <div className={`text-xs ${position.pnlPercent >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                {position.pnlPercent >= 0 ? '+' : ''}{position.pnlPercent.toFixed(0)}%
+              </div>
+            </div>
+          </div>
+        ))}
+        {closedPositions.length > 5 && (
+          <div className="px-4 py-2 text-center text-xs text-slate-400">
+            + {closedPositions.length - 5} more trades (see Stats tab for full history)
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // Trade Modal
 function TradeModal({ signal, onClose, onConfirm }: {
   signal: RegimeSignal;
@@ -583,6 +658,9 @@ export function TradingDashboard() {
           </div>
         </div>
       </div>
+
+      {/* Trade History Section */}
+      <TradeHistory positions={positions} />
 
       {/* Collapsible Options Chain */}
       <div className="bg-white rounded-lg shadow overflow-hidden">

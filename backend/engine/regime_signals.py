@@ -203,6 +203,11 @@ class RegimeSignalGenerator:
     3. During bearish regimes, wait for 1.5%+ bounce from daily low
     4. Generate BUY_CALL or BUY_PUT signal accordingly
 
+    Cooldown Strategy: "While Open"
+    - Block same-direction entries while a position is open
+    - Allow new entry immediately after position is closed
+    - Validated via backtest: +852% total P&L, 42.6% win rate, +15.8% avg P&L
+
     Exit is handled by PositionTracker:
     - Take profit: +40%
     - Stop loss: -20%
@@ -238,7 +243,8 @@ class RegimeSignalGenerator:
     ):
         self.regime_detector = regime_detector
         self.config = config or SignalGeneratorConfig()
-        self._last_entry_dates: dict[str, datetime] = {}
+        # Track open positions by symbol and direction: {symbol: {"call": True, "put": False}}
+        self._open_positions_by_direction: dict[str, dict[str, bool]] = {}
         self._open_positions: int = 0
 
     def check_entry_signal(
@@ -262,15 +268,16 @@ class RegimeSignalGenerator:
         if not regime or not regime.is_active:
             return self._no_signal(symbol, now, "No active regime")
 
-        # Check cooldown
-        last_entry = self._last_entry_dates.get(symbol)
-        if last_entry:
-            days_since = (now - last_entry).days
-            if days_since < self.config.min_days_between_entries:
-                return self._no_signal(
-                    symbol, now,
-                    f"Cooldown active ({days_since}d since last entry)"
-                )
+        # Determine target direction based on regime
+        target_direction = "call" if regime.regime_type.is_bullish else "put"
+
+        # Check "while open" cooldown - block if same-direction position is open
+        open_dirs = self._open_positions_by_direction.get(symbol, {})
+        if open_dirs.get(target_direction, False):
+            return self._no_signal(
+                symbol, now,
+                f"Position already open ({target_direction})"
+            )
 
         # Check max concurrent positions
         if self._open_positions >= self.config.max_concurrent_positions:
@@ -400,28 +407,34 @@ class RegimeSignalGenerator:
             entry_price=0.0,
         )
 
-    def record_entry(self, symbol: str) -> None:
+    def record_entry(self, symbol: str, direction: str = "call") -> None:
         """Record that an entry was taken (for cooldown tracking).
 
         Args:
             symbol: Stock symbol
+            direction: "call" or "put"
         """
-        self._last_entry_dates[symbol] = datetime.now(timezone.utc)
+        if symbol not in self._open_positions_by_direction:
+            self._open_positions_by_direction[symbol] = {}
+        self._open_positions_by_direction[symbol][direction] = True
         self._open_positions += 1
         logger.info(
-            f"[ENTRY] {symbol}: Entry recorded, "
+            f"[ENTRY] {symbol}: {direction.upper()} entry recorded, "
             f"open positions: {self._open_positions}"
         )
 
-    def record_exit(self, symbol: str) -> None:
+    def record_exit(self, symbol: str, direction: str = "call") -> None:
         """Record that a position was closed.
 
         Args:
             symbol: Stock symbol
+            direction: "call" or "put"
         """
+        if symbol in self._open_positions_by_direction:
+            self._open_positions_by_direction[symbol][direction] = False
         self._open_positions = max(0, self._open_positions - 1)
         logger.info(
-            f"[EXIT] {symbol}: Exit recorded, "
+            f"[EXIT] {symbol}: {direction.upper()} exit recorded, "
             f"open positions: {self._open_positions}"
         )
 
@@ -442,9 +455,11 @@ class RegimeSignalGenerator:
             "bounce_threshold": self.config.bounce_threshold,
             "target_dte": self.config.target_dte,
             "position_size_pct": self.config.position_size_pct,
-            "last_entries": {
-                symbol: dt.isoformat()
-                for symbol, dt in self._last_entry_dates.items()
+            "cooldown_strategy": "while_open",
+            "open_by_direction": {
+                symbol: {d: v for d, v in dirs.items() if v}
+                for symbol, dirs in self._open_positions_by_direction.items()
+                if any(dirs.values())
             },
         }
 

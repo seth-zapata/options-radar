@@ -1558,6 +1558,13 @@ async def open_position(request: OpenPositionRequest) -> dict[str, Any]:
             fill_price=request.fill_price,
         )
 
+        # Record entry for regime signal cooldown (only when trade is actually taken)
+        # This blocks same-direction entries while position is open
+        if rec.underlying == "TSLA":
+            # Convert "C"/"P" to "call"/"put" for direction tracking
+            direction = "call" if rec.right == "C" else "put"
+            regime_signal_generator.record_entry(rec.underlying, direction)
+
         # Broadcast position update to all clients
         await connection_manager.broadcast({
             "type": "position_opened",
@@ -1668,6 +1675,12 @@ async def close_position(position_id: str, request: ClosePositionRequest) -> dic
 
     if not position:
         return {"error": f"Position not found: {position_id}"}
+
+    # Record exit for regime signal cooldown (allow new same-direction entries)
+    if position.underlying == "TSLA":
+        # Convert "C"/"P" to "call"/"put" for direction tracking
+        direction = "call" if position.right == "C" else "put"
+        regime_signal_generator.record_exit(position.underlying, direction)
 
     # Broadcast position update
     await connection_manager.broadcast({
