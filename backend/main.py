@@ -47,6 +47,7 @@ from backend.engine.regime_signals import (
     PriceData,
     SignalType,
     TechnicalIndicators,
+    select_atm_option,
 )
 from backend.logging import (
     EvaluationLogger,
@@ -561,10 +562,63 @@ async def gate_evaluation_loop() -> None:
                                 f"{regime_signal.trigger_reason}"
                             )
 
+                            # Select ATM option for this signal
+                            # Convert OptionData to dict format expected by select_atm_option
+                            option_type = "call" if regime_signal.signal_type == SignalType.BUY_CALL else "put"
+                            available_options_list = [
+                                {
+                                    "type": "call" if o.canonical_id.right == "C" else "put",
+                                    "strike": o.canonical_id.strike,
+                                    "expiry": o.canonical_id.expiry,
+                                    "bid": o.bid or 0,
+                                    "ask": o.ask or 0,
+                                    "open_interest": o.open_interest or 0,
+                                    "volume": o.volume or 0,
+                                    "delta": o.delta,
+                                }
+                                for o in all_options
+                                if (o.canonical_id.right == "C") == (option_type == "call")
+                            ]
+
+                            # Select the best option
+                            selected_option = select_atm_option(
+                                regime_signal,
+                                available_options_list,
+                                regime_signal_generator.config,
+                            )
+
+                            # Build option data for broadcast
+                            option_data = None
+                            if selected_option:
+                                # Calculate position size (10% of $10k portfolio = $1000)
+                                position_size_pct = regime_signal_generator.config.position_size_pct
+                                portfolio_size = 10000  # Default portfolio size
+                                max_cost = portfolio_size * (position_size_pct / 100)
+                                contract_cost = selected_option.mid * 100
+                                suggested_contracts = max(1, int(max_cost / contract_cost)) if contract_cost > 0 else 1
+
+                                option_data = {
+                                    "strike": selected_option.strike,
+                                    "expiry": selected_option.expiry,
+                                    "dte": selected_option.dte,
+                                    "bid": selected_option.bid,
+                                    "ask": selected_option.ask,
+                                    "mid": selected_option.mid,
+                                    "delta": selected_option.delta,
+                                    "open_interest": selected_option.open_interest,
+                                    "volume": selected_option.volume,
+                                    "suggested_contracts": suggested_contracts,
+                                    "total_cost": round(suggested_contracts * selected_option.mid * 100, 2),
+                                }
+
+                            # Generate unique signal ID
+                            signal_id = f"{symbol}-{now.strftime('%Y%m%d%H%M%S')}-{regime_signal.signal_type.value}"
+
                             # Broadcast regime signal to frontend
                             await connection_manager.broadcast({
                                 "type": "regime_signal",
                                 "data": {
+                                    "id": signal_id,
                                     "symbol": symbol,
                                     "signal_type": regime_signal.signal_type.value,
                                     "regime_type": regime_signal.regime_type.value,
@@ -572,6 +626,7 @@ async def gate_evaluation_loop() -> None:
                                     "trigger_pct": regime_signal.trigger_pct,
                                     "entry_price": regime_signal.entry_price,
                                     "generated_at": regime_signal.generated_at.isoformat(),
+                                    "option": option_data,
                                 },
                                 "timestamp": now.isoformat(),
                             })

@@ -209,7 +209,22 @@ export interface RegimeStatus {
   timestamp: string;
 }
 
+export interface RegimeSignalOption {
+  strike: number;
+  expiry: string;
+  dte: number;
+  bid: number;
+  ask: number;
+  mid: number;
+  delta: number | null;
+  open_interest: number;
+  volume: number;
+  suggested_contracts: number;
+  total_cost: number;
+}
+
 export interface RegimeSignal {
+  id: string;
   symbol: string;
   signal_type: 'BUY_CALL' | 'BUY_PUT';
   regime_type: RegimeType;
@@ -217,6 +232,7 @@ export interface RegimeSignal {
   trigger_pct: number;
   entry_price: number;
   generated_at: string;
+  option?: RegimeSignalOption;
 }
 
 export interface PriceMonitoring {
