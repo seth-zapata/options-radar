@@ -14,7 +14,8 @@ export interface EvaluatedOption {
 }
 
 // Default symbols for new users (can be removed by user)
-export const DEFAULT_SYMBOLS = ['QQQ', 'NVDA', 'TSLA'];
+// TSLA is first since it's the only regime-enabled symbol
+export const DEFAULT_SYMBOLS = ['TSLA', 'QQQ', 'NVDA'];
 
 // Load watchlist from localStorage or use defaults
 const getInitialWatchlist = (): string[] => {

@@ -480,7 +480,16 @@ async def gate_evaluation_loop() -> None:
                 # Real mode - just evaluate the subscribed symbol
                 symbols_to_evaluate = ["NVDA"]
 
+            # Only evaluate regime-enabled symbols (TSLA only for now)
+            # This reduces log noise and CPU waste from evaluating non-validated symbols
+            config = load_config()
+            enabled_symbols = set(config.regime_strategy.enabled_symbols)
+
             for symbol in symbols_to_evaluate:
+                # Skip non-enabled symbols entirely
+                if symbol not in enabled_symbols:
+                    continue
+
                 # Check per-symbol rate limit (skip signal generation, but still evaluate for UI)
                 last_symbol_rec_time = _last_symbol_recommendation_time.get(symbol, 0)
                 symbol_on_cooldown = (now_ts - last_symbol_rec_time) < SYMBOL_COOLDOWN
@@ -509,10 +518,8 @@ async def gate_evaluation_loop() -> None:
                     logger.debug(f"Error fetching sentiment for {symbol}: {e}")
 
                 # === REGIME STRATEGY: Update regime and check for signals ===
-                # Only for enabled symbols (TSLA validated, others need backtesting)
-                config = load_config()
-                if (regime_detector and regime_signal_generator and
-                    symbol in config.regime_strategy.enabled_symbols):
+                # We already filtered to enabled symbols above, so just check components exist
+                if regime_detector and regime_signal_generator:
 
                     # Update regime with WSB sentiment if available
                     if sentiment and sentiment.wsb_score is not None:
@@ -694,7 +701,8 @@ async def gate_evaluation_loop() -> None:
                         # Clear abstain status for current symbol
                         await connection_manager.broadcast_abstain(None)
 
-                # Generate recommendation for ANY symbol that passes gates (if not on cooldown)
+                # Generate recommendation for enabled symbols only
+                # We already filtered to enabled_symbols at the start of the loop
                 if best_option is not None and not symbol_on_cooldown:
                     recommendation = recommender.generate(
                         result=best_result,

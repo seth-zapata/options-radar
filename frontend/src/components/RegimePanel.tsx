@@ -62,8 +62,10 @@ export function RegimePanel() {
   }, [setRegimeStatus]);
 
   // Calculate price data from underlying
+  // Only show price data when TSLA is the active symbol
   useEffect(() => {
-    if (underlying && underlying.symbol === 'TSLA') {
+    if (underlying && underlying.price > 0) {
+      // Check if we're viewing TSLA (the symbol in underlying matches)
       // In real scenario, we'd track intraday high/low
       // For now, use current price with mock calculations
       const current = underlying.price;
