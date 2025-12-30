@@ -325,9 +325,17 @@ class SpreadAcceptableGate(Gate):
 
 
 class OpenInterestSufficientGate(Gate):
-    """Ensures open interest is sufficient (>= 100)."""
+    """Ensures open interest is sufficient (>= 500).
 
-    THRESHOLD = 100
+    Compromise threshold for paper trading:
+    - OI >= 500: 71 trades, +965% total, +13.6% avg (47.9% win rate)
+    - OI >= 1000: 46 trades, +270% total, +5.9% avg (43.5% win rate)
+    - Trades with 500-999 OI: +27.8% avg, 56% win rate
+
+    Can tighten to 1000 for live trading if fills are problematic.
+    """
+
+    THRESHOLD = 500
 
     @property
     def name(self) -> str:
@@ -344,15 +352,19 @@ class OpenInterestSufficientGate(Gate):
             passed=passed,
             value=ctx.open_interest,
             threshold=self.THRESHOLD,
-            message="OK" if passed else f"OI {ctx.open_interest} below {self.THRESHOLD}",
+            message="OK" if passed else f"OI {ctx.open_interest} below {self.THRESHOLD} (liquidity risk)",
             severity=self.severity,
         )
 
 
 class VolumeSufficientGate(Gate):
-    """Ensures daily volume is sufficient (>= 50). SOFT gate."""
+    """Ensures daily volume is sufficient (>= 100). HARD gate.
 
-    THRESHOLD = 50
+    Updated from 50 (SOFT) to 100 (HARD) based on backtest validation
+    showing low-volume contracts had significant fill issues.
+    """
+
+    THRESHOLD = 100
 
     @property
     def name(self) -> str:
@@ -360,7 +372,7 @@ class VolumeSufficientGate(Gate):
 
     @property
     def severity(self) -> GateSeverity:
-        return GateSeverity.SOFT
+        return GateSeverity.HARD
 
     def evaluate(self, ctx: GateContext) -> GateResult:
         passed = ctx.volume >= self.THRESHOLD
@@ -369,7 +381,7 @@ class VolumeSufficientGate(Gate):
             passed=passed,
             value=ctx.volume,
             threshold=self.THRESHOLD,
-            message="OK" if passed else f"Volume {ctx.volume} is thin (< {self.THRESHOLD})",
+            message="OK" if passed else f"Volume {ctx.volume} below {self.THRESHOLD} (liquidity risk)",
             severity=self.severity,
         )
 

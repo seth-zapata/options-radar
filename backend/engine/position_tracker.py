@@ -64,9 +64,6 @@ class TrackedPosition:
     closed_at: str | None = None
     close_price: float | None = None
 
-    # Trailing stop state
-    high_water_mark: float = 0.0  # Highest P&L % reached
-    trailing_stop_active: bool = False  # True once activation threshold hit
 
 
 @dataclass
@@ -78,30 +75,72 @@ class ExitSignal:
     pnl: float
     pnl_percent: float
     urgency: Literal["low", "medium", "high"]
-    trigger: Literal["trailing_stop", "stop_loss", "dte_warning"]
+    trigger: Literal["take_profit", "stop_loss", "time_exit"]
+
+
+@dataclass
+class SymbolStats:
+    """Per-symbol performance statistics for paper trading evaluation.
+
+    Used to track each ticker's performance and decide whether to
+    keep or drop symbols based on live results (e.g., drop PLTR if
+    avg P&L < +5% after 4 weeks while TSLA/NVDA are > +15%).
+    """
+    symbol: str
+    trades: int = 0
+    wins: int = 0
+    losses: int = 0
+    total_pnl_dollars: float = 0.0
+    total_pnl_percent: float = 0.0  # Sum of all trade P&L %
+
+    @property
+    def win_rate(self) -> float:
+        """Win rate as percentage."""
+        return (self.wins / self.trades * 100) if self.trades > 0 else 0.0
+
+    @property
+    def avg_pnl_percent(self) -> float:
+        """Average P&L per trade as percentage."""
+        return (self.total_pnl_percent / self.trades) if self.trades > 0 else 0.0
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "symbol": self.symbol,
+            "trades": self.trades,
+            "wins": self.wins,
+            "losses": self.losses,
+            "win_rate": round(self.win_rate, 1),
+            "total_pnl_dollars": round(self.total_pnl_dollars, 2),
+            "total_pnl_percent": round(self.total_pnl_percent, 1),
+            "avg_pnl_percent": round(self.avg_pnl_percent, 1),
+        }
 
 
 @dataclass
 class PositionTrackerConfig:
     """Configuration for position tracking.
 
-    Trailing Stop Logic (backtested +1,127% improvement vs fixed 50% target):
-    - Once position reaches trailing_activation_percent, trailing stop activates
-    - Trailing stop = high_water_mark - trailing_distance_percent
-    - If trailing stop never activates, hard stop_loss_percent applies
+    Fixed Exit Rules (validated from TSLA backtesting 2024-01 to 2025-01):
+    - Take profit: Exit at +40% gain
+    - Stop loss: Exit at -20% loss
+    - Time exit: Exit when DTE < 1 (expiring)
+
+    These fixed thresholds were found optimal for the regime-filtered
+    intraday strategy with 7-day windows and 1.5% pullback/bounce entries.
 
     Attributes:
-        trailing_activation_percent: Activate trailing stop at this gain (default 30%)
-        trailing_distance_percent: Trail by this amount from high water mark (default 15%)
-        stop_loss_percent: Hard stop if trailing never activates (default -30%)
-        min_dte_warning: Warn when DTE below this (default 7)
-        max_positions: Maximum open positions (default 10)
+        take_profit_percent: Take profit threshold (default +40%)
+        stop_loss_percent: Stop loss threshold (default -20%)
+        min_dte_exit: Exit when DTE falls to this (default 1)
+        max_positions: Maximum open positions (default 3)
+        position_size_pct: Percent of portfolio per trade (default 10%)
     """
-    trailing_activation_percent: float = 30.0
-    trailing_distance_percent: float = 15.0
-    stop_loss_percent: float = -30.0
-    min_dte_warning: int = 7
-    max_positions: int = 10
+    take_profit_percent: float = 40.0
+    stop_loss_percent: float = -20.0
+    min_dte_exit: int = 1
+    max_positions: int = 3
+    position_size_pct: float = 10.0
 
 
 class PositionTracker:
@@ -132,6 +171,7 @@ class PositionTracker:
     def __init__(self, config: PositionTrackerConfig | None = None):
         self.config = config or PositionTrackerConfig()
         self._positions: dict[str, TrackedPosition] = {}
+        self._symbol_stats: dict[str, SymbolStats] = {}
 
         logger.info("Position tracker initialized")
 
@@ -238,7 +278,33 @@ class PositionTracker:
             f"@ ${close_price:.2f} (P/L: ${pnl:.0f}, {pnl_percent:.1f}%)"
         )
 
+        # Update per-symbol stats
+        self._update_symbol_stats(position)
+
         return position
+
+    def _update_symbol_stats(self, position: TrackedPosition) -> None:
+        """Update per-symbol statistics when a position is closed."""
+        symbol = position.underlying
+
+        if symbol not in self._symbol_stats:
+            self._symbol_stats[symbol] = SymbolStats(symbol=symbol)
+
+        stats = self._symbol_stats[symbol]
+        stats.trades += 1
+        stats.total_pnl_dollars += position.pnl
+        stats.total_pnl_percent += position.pnl_percent
+
+        if position.pnl > 0:
+            stats.wins += 1
+        else:
+            stats.losses += 1
+
+        logger.info(
+            f"[SYMBOL_STATS] {symbol}: {stats.trades} trades, "
+            f"{stats.wins} wins ({stats.win_rate:.0f}%), "
+            f"avg P&L: {stats.avg_pnl_percent:+.1f}%"
+        )
 
     def update_position(
         self,
@@ -274,19 +340,6 @@ class PositionTracker:
                 if position.entry_cost > 0 else 0
             )
 
-            # Update trailing stop state
-            if position.pnl_percent > position.high_water_mark:
-                position.high_water_mark = position.pnl_percent
-
-            # Activate trailing stop once we hit activation threshold
-            if (not position.trailing_stop_active and
-                    position.pnl_percent >= self.config.trailing_activation_percent):
-                position.trailing_stop_active = True
-                logger.info(
-                    f"Trailing stop activated for {position.underlying} "
-                    f"${position.strike}{position.right} at +{position.pnl_percent:.1f}%"
-                )
-
         if delta is not None:
             position.delta = delta
 
@@ -311,10 +364,10 @@ class PositionTracker:
     ) -> ExitSignal | None:
         """Check if position meets exit criteria.
 
-        Trailing Stop Logic (backtested +1,127% improvement):
-        1. If trailing stop is active: exit when P&L falls 15% from high water mark
-        2. If trailing stop not active: exit at -30% hard stop
-        3. Always exit if DTE < 7 days
+        Fixed Exit Rules (validated from TSLA backtesting):
+        1. Take profit: +40% gain
+        2. Stop loss: -20% loss
+        3. Time exit: DTE < 1 (close before expiration)
 
         Args:
             position: Position to check
@@ -324,26 +377,19 @@ class PositionTracker:
             ExitSignal if exit criteria met, None otherwise
         """
 
-        # 1. Trailing stop check (if activated)
-        if position.trailing_stop_active:
-            trailing_stop_level = (
-                position.high_water_mark - self.config.trailing_distance_percent
+        # 1. Take profit check (+40%)
+        if position.pnl_percent >= self.config.take_profit_percent:
+            return ExitSignal(
+                position_id=position.id,
+                reason=f"Take profit triggered (+{position.pnl_percent:.0f}%)",
+                current_price=position.current_price or 0,
+                pnl=position.pnl,
+                pnl_percent=position.pnl_percent,
+                urgency="medium",
+                trigger="take_profit",
             )
-            if position.pnl_percent <= trailing_stop_level:
-                return ExitSignal(
-                    position_id=position.id,
-                    reason=(
-                        f"Trailing stop triggered: fell from +{position.high_water_mark:.0f}% "
-                        f"to +{position.pnl_percent:.0f}%"
-                    ),
-                    current_price=position.current_price or 0,
-                    pnl=position.pnl,
-                    pnl_percent=position.pnl_percent,
-                    urgency="medium",
-                    trigger="trailing_stop",
-                )
 
-        # 2. Hard stop loss (if trailing stop never activated)
+        # 2. Stop loss check (-20%)
         if position.pnl_percent <= self.config.stop_loss_percent:
             return ExitSignal(
                 position_id=position.id,
@@ -355,21 +401,17 @@ class PositionTracker:
                 trigger="stop_loss",
             )
 
-        # 3. Time decay warning (avoid gamma acceleration)
-        if position.dte is not None and position.dte <= self.config.min_dte_warning:
+        # 3. Time exit (close before expiration)
+        if position.dte is not None and position.dte <= self.config.min_dte_exit:
             return ExitSignal(
                 position_id=position.id,
-                reason=f"DTE warning ({position.dte} days remaining)",
+                reason=f"Time exit ({position.dte} DTE remaining)",
                 current_price=position.current_price or 0,
                 pnl=position.pnl,
                 pnl_percent=position.pnl_percent,
-                urgency="medium" if position.dte > 3 else "high",
-                trigger="dte_warning",
+                urgency="high",
+                trigger="time_exit",
             )
-
-        # NOTE: Trailing stop replaces fixed 50% profit target after backtest
-        # showed +1,127% improvement (+39.3% avg vs +28.7% avg per trade).
-        # See: backend/scripts/backtest_trailing_stop.py for the analysis.
 
         return None
 
@@ -416,3 +458,105 @@ class PositionTracker:
         for pid in closed_ids:
             del self._positions[pid]
         return len(closed_ids)
+
+    def get_symbol_stats(self, symbol: str) -> SymbolStats | None:
+        """Get statistics for a specific symbol."""
+        return self._symbol_stats.get(symbol)
+
+    def get_all_symbol_stats(self) -> dict[str, SymbolStats]:
+        """Get statistics for all symbols."""
+        return dict(self._symbol_stats)
+
+    def get_performance_summary(self) -> dict:
+        """Get a summary of performance across all symbols.
+
+        Returns dict with:
+            - per_symbol: Dict of symbol -> stats
+            - total: Aggregate stats across all symbols
+            - underperformers: List of symbols with avg P&L < 5% while others > 15%
+        """
+        if not self._symbol_stats:
+            return {
+                "per_symbol": {},
+                "total": {
+                    "trades": 0,
+                    "wins": 0,
+                    "win_rate": 0,
+                    "total_pnl_percent": 0,
+                    "avg_pnl_percent": 0,
+                },
+                "underperformers": [],
+            }
+
+        per_symbol = {s: stats.to_dict() for s, stats in self._symbol_stats.items()}
+
+        # Calculate totals
+        total_trades = sum(s.trades for s in self._symbol_stats.values())
+        total_wins = sum(s.wins for s in self._symbol_stats.values())
+        total_pnl_pct = sum(s.total_pnl_percent for s in self._symbol_stats.values())
+
+        total = {
+            "trades": total_trades,
+            "wins": total_wins,
+            "win_rate": round((total_wins / total_trades * 100) if total_trades > 0 else 0, 1),
+            "total_pnl_percent": round(total_pnl_pct, 1),
+            "avg_pnl_percent": round((total_pnl_pct / total_trades) if total_trades > 0 else 0, 1),
+        }
+
+        # Identify underperformers: symbols with avg P&L < 5% while others > 15%
+        # Only flag if we have enough data (at least 4 trades per symbol)
+        underperformers = []
+        for symbol, stats in self._symbol_stats.items():
+            if stats.trades < 4:
+                continue  # Not enough data yet
+
+            other_stats = [s for s in self._symbol_stats.values() if s.symbol != symbol and s.trades >= 4]
+            if not other_stats:
+                continue
+
+            other_avg = sum(s.avg_pnl_percent for s in other_stats) / len(other_stats)
+
+            # Flag if this symbol is < 5% avg AND others are > 15% avg
+            if stats.avg_pnl_percent < 5 and other_avg > 15:
+                underperformers.append({
+                    "symbol": symbol,
+                    "avg_pnl": round(stats.avg_pnl_percent, 1),
+                    "trades": stats.trades,
+                    "other_avg": round(other_avg, 1),
+                    "recommendation": f"Consider dropping {symbol} (avg {stats.avg_pnl_percent:+.1f}% vs others {other_avg:+.1f}%)",
+                })
+
+        return {
+            "per_symbol": per_symbol,
+            "total": total,
+            "underperformers": underperformers,
+        }
+
+    def print_symbol_stats(self) -> None:
+        """Print formatted symbol statistics to log."""
+        summary = self.get_performance_summary()
+
+        logger.info("=" * 60)
+        logger.info("PAPER TRADING PERFORMANCE BY SYMBOL")
+        logger.info("=" * 60)
+
+        for symbol, stats in summary["per_symbol"].items():
+            logger.info(
+                f"  {symbol}: {stats['trades']} trades, "
+                f"{stats['wins']} wins ({stats['win_rate']}%), "
+                f"avg P&L: {stats['avg_pnl_percent']:+.1f}%"
+            )
+
+        logger.info("-" * 60)
+        total = summary["total"]
+        logger.info(
+            f"  TOTAL: {total['trades']} trades, "
+            f"{total['wins']} wins ({total['win_rate']}%), "
+            f"avg P&L: {total['avg_pnl_percent']:+.1f}%"
+        )
+
+        if summary["underperformers"]:
+            logger.info("-" * 60)
+            logger.warning("UNDERPERFORMERS DETECTED:")
+            for up in summary["underperformers"]:
+                logger.warning(f"  {up['recommendation']}")

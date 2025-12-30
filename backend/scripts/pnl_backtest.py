@@ -68,15 +68,19 @@ class TradeResult:
     entry_delta: float
     entry_iv: float
 
+    # Liquidity at entry
+    open_interest: int = 0
+    volume: int = 0
+
     # Exit
-    exit_date: str
-    exit_price: float
-    exit_reason: Literal["profit_target", "stop_loss", "dte_exit", "max_hold", "no_data"]
+    exit_date: str = ""
+    exit_price: float = 0.0
+    exit_reason: Literal["profit_target", "stop_loss", "dte_exit", "max_hold", "no_data"] = "no_data"
 
     # P&L
-    pnl_pct: float  # Percentage return
-    pnl_dollars: float  # Dollar P&L per contract (x100)
-    holding_days: int
+    pnl_pct: float = 0.0  # Percentage return
+    pnl_dollars: float = 0.0  # Dollar P&L per contract (x100)
+    holding_days: int = 0
 
     @property
     def was_profitable(self) -> bool:
@@ -141,7 +145,7 @@ def get_atm_contract(
     # Query for contracts near ATM with reasonable DTE
     # Strike within 5% of underlying, expiry 20-45 days out
     cursor.execute("""
-        SELECT contract_id, expiry, strike, bid, ask, delta, iv
+        SELECT contract_id, expiry, strike, bid, ask, delta, iv, open_interest, volume
         FROM options_contracts
         WHERE symbol = ?
           AND trade_date = ?
@@ -171,7 +175,7 @@ def get_atm_contract(
     best_score = float('inf')
 
     for row in rows:
-        contract_id, expiry, strike, bid, ask, delta, iv = row
+        contract_id, expiry, strike, bid, ask, delta, iv, oi, vol = row
 
         try:
             expiry_date = datetime.strptime(expiry, "%Y-%m-%d")
@@ -201,6 +205,8 @@ def get_atm_contract(
                 "delta": delta,
                 "iv": iv,
                 "dte": dte,
+                "open_interest": oi or 0,
+                "volume": vol or 0,
             }
 
     return best
@@ -466,6 +472,8 @@ async def run_backtest(
                 entry_price=entry_price,
                 entry_delta=contract["delta"],
                 entry_iv=contract["iv"],
+                open_interest=contract["open_interest"],
+                volume=contract["volume"],
                 exit_date=exit_date,
                 exit_price=exit_price,
                 exit_reason=exit_reason,

@@ -421,6 +421,12 @@ class GatingPipeline:
             if not result.passed:
                 if result.severity == GateSeverity.HARD:
                     # Hard failure - generate abstain
+                    # Extra logging for liquidity gates
+                    if gate.name in ("open_interest_sufficient", "volume_sufficient"):
+                        logger.warning(
+                            f"[LIQUIDITY_ABSTAIN] {ctx.underlying_symbol}: "
+                            f"{gate.name} failed - OI={ctx.open_interest}, Vol={ctx.volume}"
+                        )
                     logger.info(
                         f"Hard gate '{gate.name}' failed: {result.message}"
                     )
@@ -528,10 +534,10 @@ class GatingPipeline:
             "greeks_fresh": "Greeks must update within 90s",
             "spread_acceptable": f"Spread must narrow to < 10% (currently {fmt(failed_gate.value)}%)"
             if failed_gate.value else "Spread must narrow to < 10%",
-            "open_interest_sufficient": f"OI must reach 100 (currently {fmt(failed_gate.value)})"
-            if failed_gate.value else "OI must reach 100",
-            "volume_sufficient": f"Volume must reach 50 (currently {fmt(failed_gate.value)})"
-            if failed_gate.value else "Volume must reach 50",
+            "open_interest_sufficient": f"OI must reach 500 (currently {fmt(failed_gate.value)}) - try nearby strikes"
+            if failed_gate.value else "OI must reach 500 - try nearby strikes",
+            "volume_sufficient": f"Volume must reach 100 (currently {fmt(failed_gate.value)}) - try nearby strikes"
+            if failed_gate.value else "Volume must reach 100 - try nearby strikes",
             "delta_in_range": f"Delta must be 0.10-0.80 (currently {fmt(failed_gate.value, 2)})"
             if failed_gate.value else "Delta must be 0.10-0.80",
             "iv_rank_appropriate": "IV rank must align with action",
