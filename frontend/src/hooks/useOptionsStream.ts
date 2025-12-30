@@ -4,7 +4,7 @@
 
 import { useEffect, useRef, useCallback } from 'react';
 import { useOptionsStore, EvaluatedOption } from '../store/optionsStore';
-import type { OptionData, UnderlyingData, WebSocketMessage, GateResult, AbstainData, Recommendation, SessionStatus, TrackedPosition, ExitSignal } from '../types';
+import type { OptionData, UnderlyingData, WebSocketMessage, GateResult, AbstainData, Recommendation, SessionStatus, TrackedPosition, ExitSignal, RegimeStatus, RegimeSignal } from '../types';
 
 const WS_URL = import.meta.env.PROD
   ? `wss://${window.location.host}/ws`
@@ -33,6 +33,8 @@ export function useOptionsStream() {
   const addPosition = useOptionsStore((state) => state.addPosition);
   const updatePosition = useOptionsStore((state) => state.updatePosition);
   const addExitSignal = useOptionsStore((state) => state.addExitSignal);
+  const setRegimeStatus = useOptionsStore((state) => state.setRegimeStatus);
+  const addRegimeSignal = useOptionsStore((state) => state.addRegimeSignal);
   const activeSymbol = useOptionsStore((state) => state.activeSymbol);
 
   // Send subscribe message to switch symbols
@@ -215,6 +217,14 @@ export function useOptionsStream() {
                 console.log('Symbol changed to:', (message.data as { symbol: string }).symbol);
                 break;
 
+              case 'regime_status':
+                setRegimeStatus(message.data as RegimeStatus);
+                break;
+
+              case 'regime_signal':
+                addRegimeSignal(message.data as RegimeSignal);
+                break;
+
               default:
                 // Ignore unknown message types silently
                 break;
@@ -236,7 +246,7 @@ export function useOptionsStream() {
       cleanup();
       setConnectionStatus('disconnected');
     };
-  }, [setConnectionStatus, updateOption, updateUnderlying, setAbstain, setGateResults, addRecommendation, setSessionStatus, addPosition, updatePosition, addExitSignal]);
+  }, [setConnectionStatus, updateOption, updateUnderlying, setAbstain, setGateResults, addRecommendation, setSessionStatus, addPosition, updatePosition, addExitSignal, setRegimeStatus, addRegimeSignal]);
 
   // Handle symbol changes - send subscribe message to backend
   useEffect(() => {

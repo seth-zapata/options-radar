@@ -3,7 +3,7 @@
  */
 
 import { create } from 'zustand';
-import type { OptionData, UnderlyingData, AbstainData, ConnectionStatus, GateResult, Recommendation, SessionStatus, TrackedPosition, ExitSignal, HotPicks } from '../types';
+import type { OptionData, UnderlyingData, AbstainData, ConnectionStatus, GateResult, Recommendation, SessionStatus, TrackedPosition, ExitSignal, HotPicks, RegimeStatus, RegimeSignal } from '../types';
 import { optionKey } from '../types';
 
 export interface EvaluatedOption {
@@ -101,6 +101,11 @@ interface OptionsState {
   scannerError: string | null;
   scannerLastUpdate: string | null;
 
+  // Regime Strategy
+  regimeStatus: RegimeStatus | null;
+  regimeSignals: RegimeSignal[];
+  regimeLoading: boolean;
+
   // Actions
   setConnectionStatus: (status: ConnectionStatus) => void;
   updateOption: (option: OptionData) => void;
@@ -122,6 +127,9 @@ interface OptionsState {
   setScannerData: (data: HotPicks) => void;
   setScannerLoading: (loading: boolean) => void;
   setScannerError: (error: string | null) => void;
+  setRegimeStatus: (status: RegimeStatus) => void;
+  addRegimeSignal: (signal: RegimeSignal) => void;
+  setRegimeLoading: (loading: boolean) => void;
   clearAll: () => void;
 }
 
@@ -151,6 +159,11 @@ export const useOptionsStore = create<OptionsState>((set) => ({
   scannerLoading: false,
   scannerError: null,
   scannerLastUpdate: null,
+
+  // Regime Strategy
+  regimeStatus: null,
+  regimeSignals: [],
+  regimeLoading: false,
 
   // Actions
   setConnectionStatus: (status) => set({ connectionStatus: status }),
@@ -298,6 +311,19 @@ export const useOptionsStore = create<OptionsState>((set) => ({
     scannerError: error,
     scannerLoading: false,
   }),
+
+  setRegimeStatus: (status) => set({
+    regimeStatus: status,
+    regimeLoading: false,
+  }),
+
+  addRegimeSignal: (signal) => set((state) => {
+    // Keep last 20 signals
+    const newSignals = [signal, ...state.regimeSignals].slice(0, 20);
+    return { regimeSignals: newSignals };
+  }),
+
+  setRegimeLoading: (loading) => set({ regimeLoading: loading }),
 
   clearAll: () => set({
     options: new Map(),

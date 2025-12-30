@@ -172,8 +172,63 @@ export interface HotPicks {
   topOpportunities: ScanResult[];
 }
 
+// Regime strategy types
+export type RegimeType = 'strong_bullish' | 'moderate_bullish' | 'moderate_bearish' | 'strong_bearish' | 'neutral';
+
+export interface ActiveRegime {
+  type: RegimeType;
+  is_bullish: boolean;
+  is_bearish: boolean;
+  triggered_at: string;
+  expires_at: string;
+  sentiment_value: number;
+  days_remaining: number;
+  is_active: boolean;
+}
+
+export interface RegimeConfig {
+  strong_bullish_threshold: number;
+  moderate_bullish_threshold: number;
+  moderate_bearish_threshold: number;
+  strong_bearish_threshold: number;
+  regime_window_days: number;
+  pullback_threshold: number;
+  bounce_threshold: number;
+  target_dte: number;
+  enabled_symbols: string[];
+}
+
+export interface RegimeStatus {
+  symbol: string;
+  active_regime: ActiveRegime | null;
+  signal_generator: {
+    last_signal_time: string | null;
+    signals_generated_today: number;
+  };
+  config: RegimeConfig;
+  timestamp: string;
+}
+
+export interface RegimeSignal {
+  symbol: string;
+  signal_type: 'BUY_CALL' | 'BUY_PUT';
+  regime_type: RegimeType;
+  trigger_reason: string;
+  trigger_pct: number;
+  entry_price: number;
+  generated_at: string;
+}
+
+export interface PriceMonitoring {
+  high: number;
+  low: number;
+  current: number;
+  pullback_pct: number;
+  bounce_pct: number;
+}
+
 export interface WebSocketMessage {
-  type: 'option_update' | 'underlying_update' | 'gate_status' | 'abstain' | 'connection_status' | 'error' | 'ping' | 'recommendation' | 'session_status' | 'position_opened' | 'position_closed' | 'position_updated' | 'exit_signal' | 'symbol_changed';
+  type: 'option_update' | 'underlying_update' | 'gate_status' | 'abstain' | 'connection_status' | 'error' | 'ping' | 'recommendation' | 'session_status' | 'position_opened' | 'position_closed' | 'position_updated' | 'exit_signal' | 'symbol_changed' | 'regime_signal' | 'regime_status';
   data?: unknown;
   timestamp?: string;
 }
