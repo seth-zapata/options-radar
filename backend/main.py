@@ -1156,6 +1156,11 @@ async def lifespan(app: FastAPI):
             logger.info(f"  Speed: {config.auto_execution.simulation_speed}x")
             logger.info("=" * 60)
 
+            # Clear any stale positions from previous simulation runs
+            cleared = position_tracker.clear_all_positions()
+            if cleared > 0:
+                logger.info(f"Cleared {cleared} stale positions from previous simulation")
+
             # Create MockAlpacaTrader
             alpaca_trader = MockAlpacaTrader(
                 starting_balance=config.auto_execution.simulation_balance,

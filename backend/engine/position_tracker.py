@@ -620,6 +620,21 @@ class PositionTracker:
             del self._positions[pid]
         return len(closed_ids)
 
+    def clear_all_positions(self) -> int:
+        """Remove ALL positions from tracking (for simulation reset).
+
+        Returns count removed.
+        """
+        count = len(self._positions)
+        # Delete all from database
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute("DELETE FROM positions")
+            conn.commit()
+        # Clear in-memory
+        self._positions.clear()
+        logger.info(f"Cleared {count} positions for simulation reset")
+        return count
+
     def get_symbol_stats(self, symbol: str) -> SymbolStats | None:
         """Get statistics for a specific symbol."""
         return self._symbol_stats.get(symbol)
