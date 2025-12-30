@@ -352,12 +352,23 @@ class AutoExecutor:
                     right=right,
                 )
                 self._position_symbols[position.id] = occ_symbol
+                logger.debug(f"[EXIT-MONITOR] Reconstructed OCC symbol: {occ_symbol}")
 
             # Get current price from Alpaca
             alpaca_pos = alpaca_positions.get(occ_symbol)
             current_price = None
             if alpaca_pos:
                 current_price = alpaca_pos.current_price
+                logger.debug(
+                    f"[EXIT-MONITOR] {position.underlying}: price=${current_price:.2f}, "
+                    f"entry=${position.fill_price:.2f}"
+                )
+            else:
+                # Position not found in Alpaca - log for debugging
+                logger.warning(
+                    f"[EXIT-MONITOR] Position {occ_symbol} not found in trader. "
+                    f"Known symbols: {list(alpaca_positions.keys())}"
+                )
 
             # Calculate DTE
             from datetime import datetime, timezone
@@ -376,6 +387,10 @@ class AutoExecutor:
             )
 
             if exit_signal:
+                logger.info(
+                    f"[EXIT-MONITOR] Exit signal triggered for {position.underlying}: "
+                    f"{exit_signal.reason} (P&L: {exit_signal.pnl_percent:.1f}%)"
+                )
                 # Execute the exit
                 exit_result = await self._execute_exit(position, exit_signal, occ_symbol)
                 if exit_result:

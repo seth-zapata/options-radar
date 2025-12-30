@@ -1184,6 +1184,9 @@ async def lifespan(app: FastAPI):
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
 
+            # Use faster exit check interval in simulation mode
+            sim_exit_interval = 5.0 / config.auto_execution.simulation_speed  # Check every 5 sim-seconds
+
             auto_executor = AutoExecutor(
                 trader=alpaca_trader,
                 position_tracker=position_tracker,
@@ -1192,11 +1195,12 @@ async def lifespan(app: FastAPI):
                     enabled=True,
                     position_size_pct=config.auto_execution.position_size_pct,
                     max_positions=config.auto_execution.max_positions,
+                    exit_check_interval=sim_exit_interval,
                 ),
                 on_execution=on_execution_callback,
                 on_exit=on_exit_callback,
             )
-            logger.info("AutoExecutor initialized (simulation mode)")
+            logger.info(f"AutoExecutor initialized (simulation mode, exit_check={sim_exit_interval:.1f}s)")
 
             # Start exit monitoring
             await auto_executor.start_exit_monitor()

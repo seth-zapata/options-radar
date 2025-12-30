@@ -493,16 +493,17 @@ class PositionTracker:
         if dte is not None:
             position.dte = dte
 
-        # Check exit signals (only if position doesn't already have an active exit signal)
-        if position.status != "exit_signal":
-            exit_signal = self._check_exit_signals(position, sentiment_score)
+        # Check exit signals
+        exit_signal = self._check_exit_signals(position, sentiment_score)
 
-            if exit_signal:
+        if exit_signal:
+            # Update status if not already set (first time triggering)
+            if position.status != "exit_signal":
                 position.status = "exit_signal"
                 position.exit_reason = exit_signal.reason
-                # Persist exit signal status to database
-                self._save_position(position)
-                return exit_signal
+            # Persist exit signal status to database
+            self._save_position(position)
+            return exit_signal
 
         # Persist updated position data (price, pnl, etc.)
         self._save_position(position)
