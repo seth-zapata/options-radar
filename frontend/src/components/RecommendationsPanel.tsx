@@ -420,13 +420,13 @@ export function RecommendationsPanel() {
       <div className="px-4 py-3 bg-indigo-600 text-white">
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="font-bold text-lg">Trade Signals</h2>
+            <h2 className="font-bold text-lg">Multi-Symbol Signals</h2>
             <p className="text-sm text-indigo-200">
               {recommendations.length > 0
-                ? `${recommendations.length} signal${recommendations.length !== 1 ? 's' : ''} generated`
+                ? `${recommendations.length} signal${recommendations.length !== 1 ? 's' : ''} (11-gate system)`
                 : abstain
                   ? 'Waiting for gates to pass'
-                  : 'Monitoring for opportunities'}
+                  : 'Monitoring watchlist symbols'}
             </p>
           </div>
           {expiredCount > 0 && (

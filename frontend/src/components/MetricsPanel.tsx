@@ -122,6 +122,11 @@ export function MetricsPanel() {
 
   return (
     <div className="space-y-4">
+      {/* Note about what this tracks */}
+      <div className="bg-amber-50 rounded-lg p-3 text-xs text-amber-700 border border-amber-200">
+        <span className="font-medium">Note:</span> Stats track the 11-gate signal system (multi-symbol). TSLA regime strategy metrics shown in the TSLA tab.
+      </div>
+
       {/* Overall Stats */}
       <div className="bg-white rounded-lg shadow p-4">
         <h3 className="text-sm font-semibold text-slate-700 mb-3">Overall Performance</h3>

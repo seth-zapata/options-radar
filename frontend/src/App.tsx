@@ -65,9 +65,9 @@ function App() {
                       : 'text-slate-600 hover:bg-slate-50'
                   }`}
                 >
-                  Regime
+                  TSLA
                   {hasActiveRegime && (
-                    <span className="ml-1 w-2 h-2 inline-block bg-emerald-500 rounded-full animate-pulse"></span>
+                    <span className="absolute top-1 right-1 w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
                   )}
                 </button>
                 <button
