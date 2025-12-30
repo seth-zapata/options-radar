@@ -275,8 +275,124 @@ function CompactSignalRow({ signal, isConfirmed, onTakeTrade }: {
   );
 }
 
+// Expandable Trade Row Component
+function TradeRow({ position, isExpanded, onToggle }: {
+  position: TrackedPosition;
+  isExpanded: boolean;
+  onToggle: () => void;
+}) {
+  const openDate = new Date(position.openedAt);
+  const closeDate = position.closedAt ? new Date(position.closedAt) : null;
+  const holdDuration = closeDate
+    ? Math.round((closeDate.getTime() - openDate.getTime()) / (1000 * 60)) // in minutes
+    : null;
+
+  const formatHoldTime = (minutes: number) => {
+    if (minutes < 60) return `${minutes}m`;
+    if (minutes < 1440) return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+    return `${Math.floor(minutes / 1440)}d ${Math.floor((minutes % 1440) / 60)}h`;
+  };
+
+  return (
+    <div className="border-b border-slate-100 last:border-b-0">
+      {/* Collapsed Row - Clickable */}
+      <div
+        onClick={onToggle}
+        className="px-4 py-3 flex items-center justify-between cursor-pointer hover:bg-slate-50 transition-colors"
+      >
+        <div className="flex items-center gap-3">
+          <span className={`transform transition-transform text-slate-400 ${isExpanded ? 'rotate-90' : ''}`}>
+            ▶
+          </span>
+          <span className={`w-2 h-2 rounded-full ${position.pnl > 0 ? 'bg-green-500' : 'bg-red-500'}`}></span>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                position.action.includes('CALL') ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+              }`}>
+                {formatAction(position.action)}
+              </span>
+              <span className="font-mono text-sm">${position.strike} {position.right === 'C' ? 'Call' : 'Put'}</span>
+            </div>
+            <div className="text-xs text-slate-500 mt-0.5">
+              Entry: ${position.fillPrice.toFixed(2)} → Exit: ${position.closePrice?.toFixed(2) || '-'}
+            </div>
+          </div>
+        </div>
+        <div className="text-right">
+          <div className={`font-bold ${position.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+            {position.pnl >= 0 ? '+' : ''}${position.pnl.toFixed(0)}
+          </div>
+          <div className={`text-xs ${position.pnlPercent >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+            {position.pnlPercent >= 0 ? '+' : ''}{position.pnlPercent.toFixed(0)}%
+          </div>
+        </div>
+      </div>
+
+      {/* Expanded Details */}
+      {isExpanded && (
+        <div className="px-4 pb-3 bg-slate-50 border-t border-slate-100">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 py-3 text-sm">
+            <div>
+              <div className="text-xs text-slate-500 uppercase">Contracts</div>
+              <div className="font-medium">{position.contracts}</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500 uppercase">Entry Cost</div>
+              <div className="font-medium">${position.entryCost.toFixed(0)}</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500 uppercase">Expiry</div>
+              <div className="font-medium">{position.expiry}</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500 uppercase">Hold Time</div>
+              <div className="font-medium">{holdDuration ? formatHoldTime(holdDuration) : '-'}</div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 text-sm border-t border-slate-200 pt-3">
+            <div>
+              <div className="text-xs text-slate-500 uppercase">Opened</div>
+              <div className="font-medium">{openDate.toLocaleDateString()} {openDate.toLocaleTimeString()}</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500 uppercase">Closed</div>
+              <div className="font-medium">
+                {closeDate ? `${closeDate.toLocaleDateString()} ${closeDate.toLocaleTimeString()}` : '-'}
+              </div>
+            </div>
+          </div>
+
+          {position.exitReason && (
+            <div className="mt-3 pt-3 border-t border-slate-200">
+              <div className="text-xs text-slate-500 uppercase mb-1">Exit Reason</div>
+              <div className={`inline-block px-2 py-1 rounded text-sm font-medium ${
+                position.exitReason.includes('profit') || position.exitReason.includes('Profit')
+                  ? 'bg-green-100 text-green-700'
+                  : position.exitReason.includes('stop') || position.exitReason.includes('Stop')
+                  ? 'bg-red-100 text-red-700'
+                  : 'bg-slate-200 text-slate-700'
+              }`}>
+                {position.exitReason}
+              </div>
+            </div>
+          )}
+
+          <div className="mt-3 pt-3 border-t border-slate-200 text-xs text-slate-400">
+            ID: {position.id}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Trade History Component
 function TradeHistory({ positions }: { positions: TrackedPosition[] }) {
+  const [showAll, setShowAll] = useState(false);
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+
   // Get closed TSLA positions, sorted by most recent first
   const closedPositions = positions
     .filter(p => p.underlying === 'TSLA' && p.status === 'closed')
@@ -291,6 +407,23 @@ function TradeHistory({ positions }: { positions: TrackedPosition[] }) {
   const totalPnl = closedPositions.reduce((sum, p) => sum + p.pnl, 0);
   const winRate = closedPositions.length > 0 ? (wins / closedPositions.length) * 100 : null;
 
+  // Display count
+  const displayCount = showAll ? closedPositions.length : Math.min(5, closedPositions.length);
+  const displayPositions = closedPositions.slice(0, displayCount);
+  const hasMore = closedPositions.length > 5;
+
+  const toggleExpanded = (id: string) => {
+    setExpandedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
   if (closedPositions.length === 0) {
     return null; // Don't show section if no closed trades
   }
@@ -300,7 +433,10 @@ function TradeHistory({ positions }: { positions: TrackedPosition[] }) {
       <div className="px-4 py-3 bg-indigo-600 text-white flex items-center justify-between">
         <div>
           <h3 className="font-bold">Trade History</h3>
-          <p className="text-sm text-indigo-200">{closedPositions.length} closed trade{closedPositions.length !== 1 ? 's' : ''}</p>
+          <p className="text-sm text-indigo-200">
+            {closedPositions.length} closed trade{closedPositions.length !== 1 ? 's' : ''}
+            {showAll && hasMore && ' (showing all)'}
+          </p>
         </div>
         <div className="text-right">
           <div className={`text-lg font-bold ${totalPnl >= 0 ? 'text-green-300' : 'text-red-300'}`}>
@@ -311,39 +447,25 @@ function TradeHistory({ positions }: { positions: TrackedPosition[] }) {
           </div>
         </div>
       </div>
-      <div className="divide-y divide-slate-100">
-        {closedPositions.slice(0, 5).map((position) => (
-          <div key={position.id} className="px-4 py-3 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <span className={`w-2 h-2 rounded-full ${position.pnl > 0 ? 'bg-green-500' : 'bg-red-500'}`}></span>
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                    position.action.includes('CALL') ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-                  }`}>
-                    {formatAction(position.action)}
-                  </span>
-                  <span className="font-mono text-sm">${position.strike} {position.right === 'C' ? 'Call' : 'Put'}</span>
-                </div>
-                <div className="text-xs text-slate-500 mt-0.5">
-                  Entry: ${position.fillPrice.toFixed(2)} → Exit: ${position.closePrice?.toFixed(2) || '-'}
-                </div>
-              </div>
-            </div>
-            <div className="text-right">
-              <div className={`font-bold ${position.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                {position.pnl >= 0 ? '+' : ''}${position.pnl.toFixed(0)}
-              </div>
-              <div className={`text-xs ${position.pnlPercent >= 0 ? 'text-green-500' : 'text-red-500'}`}>
-                {position.pnlPercent >= 0 ? '+' : ''}{position.pnlPercent.toFixed(0)}%
-              </div>
-            </div>
-          </div>
+      <div>
+        {displayPositions.map((position) => (
+          <TradeRow
+            key={position.id}
+            position={position}
+            isExpanded={expandedIds.has(position.id)}
+            onToggle={() => toggleExpanded(position.id)}
+          />
         ))}
-        {closedPositions.length > 5 && (
-          <div className="px-4 py-2 text-center text-xs text-slate-400">
-            + {closedPositions.length - 5} more trades (see Stats tab for full history)
-          </div>
+        {hasMore && (
+          <button
+            onClick={() => setShowAll(!showAll)}
+            className="w-full px-4 py-3 text-center text-sm font-medium text-indigo-600 hover:bg-indigo-50 transition-colors border-t border-slate-100"
+          >
+            {showAll
+              ? 'Show Less'
+              : `Show All ${closedPositions.length} Trades (+${closedPositions.length - 5} more)`
+            }
+          </button>
         )}
       </div>
     </div>
