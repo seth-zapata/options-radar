@@ -33,6 +33,7 @@ export function useOptionsStream() {
   const addPosition = useOptionsStore((state) => state.addPosition);
   const updatePosition = useOptionsStore((state) => state.updatePosition);
   const addExitSignal = useOptionsStore((state) => state.addExitSignal);
+  const clearExitSignal = useOptionsStore((state) => state.clearExitSignal);
   const setRegimeStatus = useOptionsStore((state) => state.setRegimeStatus);
   const addRegimeSignal = useOptionsStore((state) => state.addRegimeSignal);
   const activeSymbol = useOptionsStore((state) => state.activeSymbol);
@@ -185,9 +186,14 @@ export function useOptionsStream() {
                 addPosition(message.data as TrackedPosition);
                 break;
 
-              case 'position_closed':
-                updatePosition(message.data as TrackedPosition);
+              case 'position_closed': {
+                // Backend sends {position: {...}, order: {...}} - extract the position
+                const closedData = message.data as { position: TrackedPosition };
+                updatePosition(closedData.position);
+                // Clear any exit signals for this position since it's now closed
+                clearExitSignal(closedData.position.id);
                 break;
+              }
 
               case 'exit_signal':
                 addExitSignal(message.data as ExitSignal);
@@ -246,7 +252,7 @@ export function useOptionsStream() {
       cleanup();
       setConnectionStatus('disconnected');
     };
-  }, [setConnectionStatus, updateOption, updateUnderlying, setAbstain, setGateResults, addRecommendation, setSessionStatus, addPosition, updatePosition, addExitSignal, setRegimeStatus, addRegimeSignal]);
+  }, [setConnectionStatus, updateOption, updateUnderlying, setAbstain, setGateResults, addRecommendation, setSessionStatus, addPosition, updatePosition, addExitSignal, clearExitSignal, setRegimeStatus, addRegimeSignal]);
 
   // Handle symbol changes - send subscribe message to backend
   useEffect(() => {
