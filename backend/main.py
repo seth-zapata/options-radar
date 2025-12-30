@@ -49,6 +49,21 @@ from backend.engine.regime_signals import (
     TechnicalIndicators,
     select_atm_option,
 )
+from backend.engine.auto_executor import (
+    AutoExecutor,
+    AutoExecutorConfig,
+    ExecutionResult,
+)
+from backend.data.alpaca_trader import (
+    AlpacaTrader,
+    OrderResult,
+    PositionInfo as AlpacaPositionInfo,
+    AccountInfo,
+    build_occ_symbol,
+    parse_occ_symbol,
+)
+from backend.data.mock_trader import MockAlpacaTrader
+from backend.data.simulation import SimulationController
 from backend.logging import (
     EvaluationLogger,
     EvaluationMetrics,
@@ -105,6 +120,12 @@ session_replayer = SessionReplayer(persist_path="./logs/replays")
 # Regime-filtered strategy components (validated: 71 trades, 43.7% win, +17.4% avg return)
 regime_detector: RegimeDetector | None = None
 regime_signal_generator: RegimeSignalGenerator | None = None
+
+# Auto-execution components (paper trading only)
+alpaca_trader: AlpacaTrader | MockAlpacaTrader | None = None
+auto_executor: AutoExecutor | None = None
+simulation_controller: SimulationController | None = None
+SIMULATION_MODE = False  # Set to True when running in simulation mode
 
 # Rate limiting: track last recommendation time per contract AND per symbol
 _last_recommendation_time: dict[str, float] = {}  # Per contract (symbol+strike+expiry+right)
@@ -631,6 +652,25 @@ async def gate_evaluation_loop() -> None:
                                 "timestamp": now.isoformat(),
                             })
 
+                            # Auto-execute the signal if enabled and option is selected
+                            if auto_executor and selected_option:
+                                try:
+                                    result = await auto_executor.execute_signal(
+                                        regime_signal, selected_option
+                                    )
+                                    if result.success:
+                                        logger.info(
+                                            f"[AUTO-EXEC] Executed {regime_signal.signal_type.value} "
+                                            f"on {symbol}: {result.contracts} contracts @ "
+                                            f"${result.fill_price:.2f}"
+                                        )
+                                    else:
+                                        logger.warning(
+                                            f"[AUTO-EXEC] Failed: {result.error}"
+                                        )
+                                except Exception as e:
+                                    logger.error(f"[AUTO-EXEC] Error executing signal: {e}")
+
                 # Fetch options indicators (P/C Ratio, Max Pain) for this symbol
                 options_ind = await get_options_indicators(symbol)
 
@@ -1025,6 +1065,8 @@ async def lifespan(app: FastAPI):
     global aggregator, alpaca_client, orats_client, subscription_manager
     global mock_generators, watchlist_symbols, current_symbol
     global regime_detector, regime_signal_generator
+    global alpaca_trader, auto_executor, alpaca_rest_client
+    global SIMULATION_MODE, simulation_controller
 
     logger.info("Starting OptionsRadar server...")
 
@@ -1103,6 +1145,109 @@ async def lifespan(app: FastAPI):
 
         logger.info(f"Tracking {len(mock_generators)} symbols: {list(mock_generators.keys())}")
 
+        # Initialize simulation mode if TRADING_MODE=simulation
+        trading_mode = config.auto_execution.mode
+
+        if trading_mode == "simulation":
+            SIMULATION_MODE = True
+            logger.info("=" * 60)
+            logger.info("SIMULATION MODE ENABLED")
+            logger.info(f"  Starting balance: ${config.auto_execution.simulation_balance:,.0f}")
+            logger.info(f"  Speed: {config.auto_execution.simulation_speed}x")
+            logger.info("=" * 60)
+
+            # Create MockAlpacaTrader
+            alpaca_trader = MockAlpacaTrader(
+                starting_balance=config.auto_execution.simulation_balance,
+                auto_execute=True,
+                simulation_speed=config.auto_execution.simulation_speed,
+            )
+            logger.info("MockAlpacaTrader initialized")
+
+            # Initialize AutoExecutor for signal-to-order flow
+            async def on_execution_callback(result: ExecutionResult):
+                """Broadcast execution result to clients."""
+                await connection_manager.broadcast({
+                    "type": "trade_executed",
+                    "data": result.to_dict(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
+            async def on_exit_callback(position: TrackedPosition, order: OrderResult):
+                """Broadcast position exit to clients."""
+                await connection_manager.broadcast({
+                    "type": "position_closed",
+                    "data": {
+                        "position": position_to_dict(position),
+                        "order": order.to_dict(),
+                    },
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
+            auto_executor = AutoExecutor(
+                trader=alpaca_trader,
+                position_tracker=position_tracker,
+                signal_generator=regime_signal_generator,
+                config=AutoExecutorConfig(
+                    enabled=True,
+                    position_size_pct=config.auto_execution.position_size_pct,
+                    max_positions=config.auto_execution.max_positions,
+                ),
+                on_execution=on_execution_callback,
+                on_exit=on_exit_callback,
+            )
+            logger.info("AutoExecutor initialized (simulation mode)")
+
+            # Start exit monitoring
+            await auto_executor.start_exit_monitor()
+            logger.info("Exit monitor started")
+
+            # Initialize SimulationController
+            async def on_regime_change(symbol: str, regime_type: str, sentiment: float):
+                """Handle simulated regime changes."""
+                if regime_detector:
+                    regime_detector.update_regime(symbol, sentiment)
+                await connection_manager.broadcast({
+                    "type": "simulation_regime",
+                    "data": {
+                        "symbol": symbol,
+                        "regime": regime_type,
+                        "sentiment": sentiment,
+                    },
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
+            async def on_price_update(symbol: str, price: float, high: float, low: float):
+                """Handle simulated price updates."""
+                await connection_manager.broadcast({
+                    "type": "simulation_price",
+                    "data": {
+                        "symbol": symbol,
+                        "price": price,
+                        "high": high,
+                        "low": low,
+                        "pullback_pct": ((high - price) / high) * 100 if high > 0 else 0,
+                        "bounce_pct": ((price - low) / low) * 100 if low > 0 else 0,
+                    },
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
+            simulation_controller = SimulationController(
+                mock_trader=alpaca_trader,
+                regime_detector=regime_detector,
+                signal_generator=regime_signal_generator,
+                on_regime_change=on_regime_change,
+                on_price_update=on_price_update,
+                speed=config.auto_execution.simulation_speed,
+            )
+
+            # Start simulation with regime-enabled symbols
+            await simulation_controller.start(list(config.regime_strategy.enabled_symbols))
+            logger.info(
+                f"SimulationController started "
+                f"(symbols={config.regime_strategy.enabled_symbols})"
+            )
+
         # Start gate evaluation loop
         task = asyncio.create_task(gate_evaluation_loop())
         _background_tasks.add(task)
@@ -1114,6 +1259,12 @@ async def lifespan(app: FastAPI):
 
         # Shutdown mock mode
         logger.info("Shutting down OptionsRadar server...")
+
+        # Stop simulation controller if running
+        if simulation_controller:
+            await simulation_controller.stop()
+            logger.info("SimulationController stopped")
+
         for symbol, generator in mock_generators.items():
             generator.stop_streaming()
 
@@ -1201,6 +1352,139 @@ async def lifespan(app: FastAPI):
     alpaca_rest_client = AlpacaRestClient(config=config.alpaca)
     logger.info("Alpaca REST client initialized for options chain OI (P/C Ratio)")
 
+    # Initialize trader for order execution
+    # Mode: "simulation" = MockAlpacaTrader, "paper" = real Alpaca paper trading
+    # Note: SIMULATION_MODE, simulation_controller already declared global in MOCK_MODE block
+    trading_mode = config.auto_execution.mode
+
+    try:
+        if trading_mode == "simulation":
+            # SIMULATION MODE: Use MockAlpacaTrader for testing
+            SIMULATION_MODE = True
+            alpaca_trader = MockAlpacaTrader(
+                starting_balance=config.auto_execution.simulation_balance,
+                auto_execute=True,
+                simulation_speed=config.auto_execution.simulation_speed,
+            )
+            logger.info(
+                f"SIMULATION MODE - MockAlpacaTrader initialized "
+                f"(balance=${config.auto_execution.simulation_balance:,.0f}, "
+                f"speed={config.auto_execution.simulation_speed}x)"
+            )
+        else:
+            # PAPER/OFF MODE: Use real Alpaca trader
+            SIMULATION_MODE = False
+            alpaca_trader = AlpacaTrader(
+                api_key=config.alpaca.api_key,
+                secret_key=config.alpaca.secret_key,
+                paper=config.alpaca.paper,
+                auto_execute=config.auto_execution.enabled,
+            )
+            logger.info(
+                f"AlpacaTrader initialized (paper={config.alpaca.paper}, "
+                f"auto_execute={config.auto_execution.enabled})"
+            )
+
+        # Initialize AutoExecutor for signal-to-order flow
+        async def on_execution_callback(result: ExecutionResult):
+            """Broadcast execution result to clients."""
+            await connection_manager.broadcast({
+                "type": "trade_executed",
+                "data": result.to_dict(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+        async def on_exit_callback(position: TrackedPosition, order: OrderResult):
+            """Broadcast position exit to clients."""
+            await connection_manager.broadcast({
+                "type": "position_closed",
+                "data": {
+                    "position": position_to_dict(position),
+                    "order": order.to_dict(),
+                },
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+        auto_executor = AutoExecutor(
+            trader=alpaca_trader,
+            position_tracker=position_tracker,
+            signal_generator=regime_signal_generator,
+            config=AutoExecutorConfig(
+                enabled=config.auto_execution.enabled or SIMULATION_MODE,
+                position_size_pct=config.auto_execution.position_size_pct,
+                max_positions=config.auto_execution.max_positions,
+            ),
+            on_execution=on_execution_callback,
+            on_exit=on_exit_callback,
+        )
+
+        # Sync positions (only for real Alpaca, not simulation)
+        if not SIMULATION_MODE:
+            synced = auto_executor.sync_from_alpaca()
+            if synced > 0:
+                logger.info(f"Synced {synced} existing position(s) from Alpaca")
+
+        # Start exit monitoring if auto-execution is enabled
+        if config.auto_execution.enabled or SIMULATION_MODE:
+            await auto_executor.start_exit_monitor()
+            logger.info("Exit monitor started")
+
+        # Initialize SimulationController for simulation mode
+        if SIMULATION_MODE:
+            async def on_regime_change(symbol: str, regime_type: str, sentiment: float):
+                """Handle simulated regime changes."""
+                # Update regime detector with simulated sentiment
+                if regime_detector:
+                    regime_detector.update_regime(symbol, sentiment)
+                # Broadcast to clients
+                await connection_manager.broadcast({
+                    "type": "simulation_regime",
+                    "data": {
+                        "symbol": symbol,
+                        "regime": regime_type,
+                        "sentiment": sentiment,
+                    },
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
+            async def on_price_update(symbol: str, price: float, high: float, low: float):
+                """Handle simulated price updates."""
+                # Broadcast to clients for UI updates
+                await connection_manager.broadcast({
+                    "type": "simulation_price",
+                    "data": {
+                        "symbol": symbol,
+                        "price": price,
+                        "high": high,
+                        "low": low,
+                        "pullback_pct": ((high - price) / high) * 100 if high > 0 else 0,
+                        "bounce_pct": ((price - low) / low) * 100 if low > 0 else 0,
+                    },
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
+            simulation_controller = SimulationController(
+                mock_trader=alpaca_trader,
+                regime_detector=regime_detector,
+                signal_generator=regime_signal_generator,
+                on_regime_change=on_regime_change,
+                on_price_update=on_price_update,
+                speed=config.auto_execution.simulation_speed,
+            )
+
+            # Start simulation with regime-enabled symbols
+            await simulation_controller.start(list(config.regime_strategy.enabled_symbols))
+            logger.info(
+                f"SimulationController started "
+                f"(symbols={config.regime_strategy.enabled_symbols})"
+            )
+
+    except Exception as e:
+        logger.warning(f"Could not initialize trading: {e}")
+        alpaca_trader = None
+        auto_executor = None
+        simulation_controller = None
+
     # Connect to Alpaca
     await alpaca_client.connect()
 
@@ -1253,6 +1537,14 @@ async def lifespan(app: FastAPI):
 
     if orats_client:
         await orats_client.__aexit__(None, None, None)
+
+    # Stop auto-executor exit monitor
+    if auto_executor:
+        await auto_executor.stop_exit_monitor()
+
+    # Stop simulation controller
+    if simulation_controller:
+        await simulation_controller.stop()
 
     logger.info("Shutdown complete")
 
@@ -1729,6 +2021,254 @@ async def dismiss_exit_signal(position_id: str) -> dict[str, Any]:
     })
 
     return {"position": position_to_dict(position)}
+
+
+# ============================================================================
+# Trading API Endpoints (Alpaca Paper Trading)
+# ============================================================================
+
+@app.get("/api/trading/account")
+async def get_trading_account() -> dict[str, Any]:
+    """Get Alpaca trading account information.
+
+    Returns account balance, buying power, and status.
+    Only works when auto-execution is configured.
+    """
+    if not alpaca_trader:
+        return {"error": "Trading not configured. Set ALPACA_API_KEY and ALPACA_SECRET_KEY."}
+
+    try:
+        account = alpaca_trader.get_account()
+        return {
+            "account": account.to_dict(),
+            "autoExecuteEnabled": alpaca_trader.auto_execute,
+            "marketOpen": alpaca_trader.is_market_open(),
+        }
+    except Exception as e:
+        logger.error(f"Failed to get account: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/trading/positions")
+async def get_trading_positions() -> dict[str, Any]:
+    """Get Alpaca positions.
+
+    Returns all positions from Alpaca (source of truth for paper trading).
+    """
+    if not alpaca_trader:
+        return {"error": "Trading not configured. Set ALPACA_API_KEY and ALPACA_SECRET_KEY."}
+
+    try:
+        positions = alpaca_trader.get_option_positions()
+        return {
+            "positions": [p.to_dict() for p in positions],
+            "count": len(positions),
+        }
+    except Exception as e:
+        logger.error(f"Failed to get positions: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/trading/orders")
+async def get_trading_orders(limit: int = 20) -> dict[str, Any]:
+    """Get recent Alpaca orders.
+
+    Returns order history for review/audit.
+    """
+    if not alpaca_trader:
+        return {"error": "Trading not configured. Set ALPACA_API_KEY and ALPACA_SECRET_KEY."}
+
+    try:
+        orders = alpaca_trader.get_recent_orders(limit=limit)
+        return {
+            "orders": orders,
+            "count": len(orders),
+        }
+    except Exception as e:
+        logger.error(f"Failed to get orders: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/trading/status")
+async def get_trading_status() -> dict[str, Any]:
+    """Get auto-execution status.
+
+    Returns current configuration and whether auto-execution is enabled.
+    """
+    if not auto_executor:
+        return {
+            "configured": False,
+            "enabled": False,
+            "simulation_mode": SIMULATION_MODE,
+            "error": "Auto-execution not configured",
+        }
+
+    return {
+        "configured": True,
+        "simulation_mode": SIMULATION_MODE,
+        **auto_executor.get_status(),
+    }
+
+
+@app.get("/api/simulation/status")
+async def get_simulation_status() -> dict[str, Any]:
+    """Get simulation status.
+
+    Returns current simulation state including prices, regime, and portfolio.
+    """
+    if not SIMULATION_MODE or not simulation_controller:
+        return {
+            "active": False,
+            "error": "Simulation mode not active",
+        }
+
+    return {
+        "active": True,
+        **simulation_controller.get_simulation_status(),
+    }
+
+
+@app.post("/api/trading/enable")
+async def enable_auto_execution() -> dict[str, Any]:
+    """Enable auto-execution.
+
+    Enables automatic order execution when signals fire.
+    """
+    if not auto_executor or not alpaca_trader:
+        return {"error": "Auto-execution not configured"}
+
+    if not alpaca_trader.paper:
+        return {"error": "Auto-execution only allowed in paper mode"}
+
+    alpaca_trader.auto_execute = True
+    auto_executor.config.enabled = True
+
+    # Start exit monitor if not running
+    if not auto_executor._running:
+        await auto_executor.start_exit_monitor()
+
+    logger.info("[TRADING] Auto-execution ENABLED")
+
+    return {
+        "enabled": True,
+        "status": auto_executor.get_status(),
+    }
+
+
+@app.post("/api/trading/disable")
+async def disable_auto_execution() -> dict[str, Any]:
+    """Disable auto-execution.
+
+    Stops automatic order execution. Existing positions remain open.
+    """
+    if not auto_executor or not alpaca_trader:
+        return {"error": "Auto-execution not configured"}
+
+    alpaca_trader.auto_execute = False
+    auto_executor.config.enabled = False
+
+    logger.info("[TRADING] Auto-execution DISABLED")
+
+    return {
+        "enabled": False,
+        "status": auto_executor.get_status(),
+    }
+
+
+@app.post("/api/trading/sync")
+async def sync_positions() -> dict[str, Any]:
+    """Sync position tracker with Alpaca positions.
+
+    Imports any Alpaca positions not already tracked.
+    """
+    if not auto_executor:
+        return {"error": "Auto-execution not configured"}
+
+    try:
+        synced = auto_executor.sync_from_alpaca()
+        return {
+            "synced": synced,
+            "message": f"Synced {synced} position(s) from Alpaca",
+        }
+    except Exception as e:
+        logger.error(f"Failed to sync positions: {e}")
+        return {"error": str(e)}
+
+
+class ManualOrderRequest(BaseModel):
+    """Request body for manual order submission."""
+    symbol: str
+    expiry: str
+    strike: float
+    right: str  # "C" or "P"
+    qty: int
+    order_type: str = "market"  # "market" or "limit"
+    limit_price: float | None = None
+
+
+@app.post("/api/trading/order")
+async def submit_manual_order(request: ManualOrderRequest) -> dict[str, Any]:
+    """Submit a manual option order.
+
+    Allows manual order submission for testing or override.
+    """
+    if not alpaca_trader:
+        return {"error": "Trading not configured"}
+
+    if not alpaca_trader.paper:
+        return {"error": "Manual orders only allowed in paper mode"}
+
+    # Build OCC symbol
+    occ_symbol = build_occ_symbol(
+        underlying=request.symbol,
+        expiry=request.expiry,
+        strike=request.strike,
+        right=request.right,
+    )
+
+    # Submit order
+    result = alpaca_trader.submit_option_order(
+        occ_symbol=occ_symbol,
+        qty=request.qty,
+        side="buy",
+        order_type=request.order_type,
+        limit_price=request.limit_price,
+    )
+
+    if result.success:
+        # Track in position tracker
+        action = "BUY_CALL" if request.right == "C" else "BUY_PUT"
+        fill_price = result.filled_avg_price or request.limit_price or 0
+
+        if fill_price > 0:
+            position = position_tracker.open_position(
+                recommendation_id=f"manual_{result.order_id}",
+                underlying=request.symbol,
+                expiry=request.expiry,
+                strike=request.strike,
+                right=request.right,
+                action=action,
+                contracts=request.qty,
+                fill_price=fill_price,
+            )
+
+            # Record entry for cooldown
+            direction = "call" if request.right == "C" else "put"
+            if regime_signal_generator:
+                regime_signal_generator.record_entry(request.symbol, direction)
+
+            # Store mapping for auto-executor
+            if auto_executor:
+                auto_executor._position_symbols[position.id] = occ_symbol
+
+            # Broadcast
+            await connection_manager.broadcast({
+                "type": "position_opened",
+                "data": position_to_dict(position),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+    return {"order": result.to_dict()}
 
 
 # ============================================================================

@@ -243,6 +243,79 @@ export interface PriceMonitoring {
   bounce_pct: number;
 }
 
+// Auto-execution types
+export interface TradingStatus {
+  configured: boolean;
+  enabled: boolean;
+  auto_execution: boolean;
+  simulation_mode: boolean;
+  open_positions: number;
+  max_positions: number;
+  position_size_pct: number;
+  exit_monitor_running: boolean;
+  error?: string;
+}
+
+export interface SimulationStatus {
+  active: boolean;
+  running: boolean;
+  speed: number;
+  currentRegime: string;
+  sentiment: number;
+  prices: Record<string, { price: number; high: number; low: number }>;
+  mockPortfolio: {
+    cash: number;
+    equity: number;
+    buyingPower: number;
+    openPositions: number;
+    unrealizedPl: number;
+    closedPl: number;
+    totalPl: number;
+    positions: Array<{
+      symbol: string;
+      qty: number;
+      entryPrice: number;
+      currentPrice: number;
+      pl: number;
+      plPercent: number;
+    }>;
+  };
+  error?: string;
+}
+
+export interface AlpacaAccount {
+  equity: number;
+  buying_power: number;
+  cash: number;
+  portfolio_value: number;
+  positions_count: number;
+  day_trade_count: number;
+  pattern_day_trader: boolean;
+}
+
+export interface AlpacaPosition {
+  symbol: string;
+  qty: number;
+  market_value: number;
+  cost_basis: number;
+  unrealized_pl: number;
+  unrealized_plpc: number;
+  current_price: number;
+  avg_entry_price: number;
+}
+
+export interface AlpacaOrder {
+  id: string;
+  symbol: string;
+  qty: number;
+  side: 'buy' | 'sell';
+  type: string;
+  status: string;
+  filled_qty: number;
+  filled_avg_price: number | null;
+  submitted_at: string;
+}
+
 export interface WebSocketMessage {
   type: 'option_update' | 'underlying_update' | 'gate_status' | 'abstain' | 'connection_status' | 'error' | 'ping' | 'recommendation' | 'session_status' | 'position_opened' | 'position_closed' | 'position_updated' | 'exit_signal' | 'symbol_changed' | 'regime_signal' | 'regime_status';
   data?: unknown;

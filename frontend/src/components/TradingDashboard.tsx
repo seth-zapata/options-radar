@@ -7,6 +7,7 @@ import { useEffect, useState } from 'react';
 import { useOptionsStore } from '../store/optionsStore';
 import type { RegimeStatus, RegimeSignal, RegimeType, TrackedPosition, ExitSignal } from '../types';
 import { ChainView } from './ChainView';
+import { TradingControlPanel } from './TradingControlPanel';
 
 const API_BASE = 'http://localhost:8000';
 
@@ -576,6 +577,9 @@ export function TradingDashboard() {
           </div>
         </div>
       </div>
+
+      {/* Auto-Execution Control Panel */}
+      <TradingControlPanel />
 
       {/* Main Content - Two Columns */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

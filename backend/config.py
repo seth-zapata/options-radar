@@ -111,6 +111,32 @@ class SignalQualityConfig:
 
 
 @dataclass(frozen=True)
+class AutoExecutionConfig:
+    """Auto-execution configuration for automated paper trading.
+
+    When enabled, signals are automatically executed via Alpaca paper trading.
+    Positions are monitored for exit conditions and auto-closed.
+
+    Trading modes:
+    - "off": No auto-execution, manual trading only
+    - "simulation": Use MockAlpacaTrader for testing without Alpaca
+    - "paper": Use Alpaca paper trading (requires credentials)
+    """
+
+    enabled: bool = False  # Must explicitly enable auto-execution
+    mode: str = "off"  # "off" | "simulation" | "paper"
+    position_size_pct: float = 10.0  # % of portfolio per trade
+    max_positions: int = 3  # Maximum concurrent positions
+    max_contract_price: float = 20.0  # Don't buy options over this price
+    min_contract_price: float = 0.50  # Don't buy options under this price
+    exit_check_interval: float = 30.0  # Seconds between exit checks
+    use_limit_orders: bool = True  # Use limit orders at mid price
+    limit_offset_pct: float = 0.5  # Offset from mid for limit orders
+    simulation_speed: float = 5.0  # Speed multiplier for simulation mode
+    simulation_balance: float = 100000.0  # Starting balance for simulation
+
+
+@dataclass(frozen=True)
 class RegimeStrategyConfig:
     """Regime-filtered intraday strategy configuration.
 
@@ -197,6 +223,9 @@ class AppConfig:
     # Regime-filtered strategy configuration
     regime_strategy: RegimeStrategyConfig = RegimeStrategyConfig()
 
+    # Auto-execution configuration
+    auto_execution: AutoExecutionConfig = AutoExecutionConfig()
+
 
 def _get_env_or_raise(key: str) -> str:
     """Get environment variable or raise if not set."""
@@ -245,4 +274,12 @@ def load_config() -> AppConfig:
             api_key=os.getenv("EODHD_API_KEY", ""),
         ),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
+        auto_execution=AutoExecutionConfig(
+            enabled=_get_env_bool("AUTO_EXECUTE", default=False),
+            mode=os.getenv("TRADING_MODE", "off"),  # "off" | "simulation" | "paper"
+            position_size_pct=float(os.getenv("AUTO_EXECUTE_POSITION_SIZE", "10.0")),
+            max_positions=int(os.getenv("AUTO_EXECUTE_MAX_POSITIONS", "3")),
+            simulation_speed=float(os.getenv("SIMULATION_SPEED", "5.0")),
+            simulation_balance=float(os.getenv("SIMULATION_BALANCE", "100000.0")),
+        ),
     )

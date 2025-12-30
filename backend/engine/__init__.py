@@ -75,6 +75,11 @@ from backend.engine.scanner import (
     DailyScanner,
     ScanResult,
 )
+from backend.engine.auto_executor import (
+    AutoExecutor,
+    AutoExecutorConfig,
+    ExecutionResult,
+)
 
 __all__ = [
     # Gate types
@@ -139,4 +144,8 @@ __all__ = [
     # Scanner
     "DailyScanner",
     "ScanResult",
+    # Auto Executor
+    "AutoExecutor",
+    "AutoExecutorConfig",
+    "ExecutionResult",
 ]
