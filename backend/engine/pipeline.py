@@ -28,6 +28,8 @@ from backend.engine.gates import (
     DATA_FRESHNESS_GATES,
     LIQUIDITY_GATES,
     PORTFOLIO_CONSTRAINT_GATES,
+    POSITION_MODIFIER_GATES,
+    RISK_MANAGEMENT_GATES,
     SENTIMENT_GATES,
     SIGNAL_QUALITY_GATES,
     STRATEGY_FIT_GATES,
@@ -50,6 +52,8 @@ class PipelineStage(str, Enum):
     PORTFOLIO_CONSTRAINTS = "portfolio_constraints"
     SIGNAL_QUALITY = "signal_quality"  # News + WSB alignment, mentions, symbol filter
     SENTIMENT = "sentiment"  # Soft sentiment gates for confidence
+    RISK_MANAGEMENT = "risk_management"  # Earnings blackout, VIX panic, trading hours
+    POSITION_MODIFIERS = "position_modifiers"  # VIX elevated, trading hours boost
     EXPLAIN = "explain"
 
 
@@ -179,6 +183,8 @@ class GatingPipeline:
     portfolio_constraint_gates: list[Gate] = field(default_factory=lambda: list(PORTFOLIO_CONSTRAINT_GATES))
     signal_quality_gates: list[Gate] = field(default_factory=lambda: list(SIGNAL_QUALITY_GATES))
     sentiment_gates: list[Gate] = field(default_factory=lambda: list(SENTIMENT_GATES))
+    risk_management_gates: list[Gate] = field(default_factory=lambda: list(RISK_MANAGEMENT_GATES))
+    position_modifier_gates: list[Gate] = field(default_factory=lambda: list(POSITION_MODIFIER_GATES))
 
     def evaluate(
         self,
@@ -282,7 +288,29 @@ class GatingPipeline:
         if stage_result is not None:
             return stage_result
 
-        # Stage 7: Explain (all gates passed)
+        # Stage 7: Risk Management (earnings blackout, VIX panic, trading hours)
+        stage_result = self._run_stage(
+            PipelineStage.RISK_MANAGEMENT,
+            self.risk_management_gates,
+            ctx,
+            all_results,
+            soft_failures,
+        )
+        if stage_result is not None:
+            return stage_result
+
+        # Stage 8: Position Modifiers (VIX elevated, trading hours boost)
+        stage_result = self._run_stage(
+            PipelineStage.POSITION_MODIFIERS,
+            self.position_modifier_gates,
+            ctx,
+            all_results,
+            soft_failures,
+        )
+        if stage_result is not None:
+            return stage_result
+
+        # Stage 9: Explain (all gates passed)
         # Determine if signal is bullish for technical alignment
         is_bullish = action in ("BUY_CALL", "SELL_PUT")
         confidence_cap = self._calculate_confidence_cap(

@@ -50,6 +50,6 @@ build/
 htmlcov/
 .coverage
 coverage.xml
-data/
-cache/
+/data/
+/cache/
 backups/

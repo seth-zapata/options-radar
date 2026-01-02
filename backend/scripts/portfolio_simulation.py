@@ -9,16 +9,22 @@ Mirrors the live trading system behavior:
 - Exit rules: +40% take profit, -20% stop loss, DTE < 1
 - Cooldown: "while open" (block same direction while position open)
 
+Risk Management Improvements (configurable):
+- Earnings blackout: Block trades within X days of earnings
+- VIX regime filter: Block/reduce trades during high VIX
+- Dynamic position sizing: Size based on signal conviction
+
 Tests different position sizing scenarios with compounding.
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from pathlib import Path
 from collections import defaultdict
 from typing import Optional
@@ -33,6 +39,10 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 load_dotenv(Path(__file__).parent.parent.parent / ".env")
+
+# Import improvement modules
+from backend.data.earnings_calendar import EarningsCalendar, HISTORICAL_EARNINGS
+from backend.data.vix_client import VIXClient, VIXRegime
 
 CACHE_DB = Path(__file__).parent.parent.parent / "cache" / "options_data.db"
 
@@ -56,6 +66,49 @@ MIN_OI = 500
 # Portfolio parameters
 STARTING_CAPITAL = 100_000
 MAX_CONCURRENT_POSITIONS = 3
+
+
+# =============================================================================
+# RISK MANAGEMENT IMPROVEMENTS (configurable flags)
+# =============================================================================
+
+@dataclass
+class ImprovementConfig:
+    """Configuration for the 4 risk management improvements."""
+    # Improvement 1: Earnings Blackout
+    earnings_blackout_enabled: bool = True
+    earnings_blackout_days_before: int = 5
+    earnings_blackout_days_after: int = 1
+
+    # Improvement 2: VIX Regime Filter
+    vix_filter_enabled: bool = True
+    vix_panic_threshold: float = 35.0  # Block entries above this
+    vix_elevated_threshold: float = 25.0  # Reduce position size above this
+    vix_elevated_position_modifier: float = 0.5  # 50% position size when elevated
+
+    # Improvement 3: Trading Hours - Not applicable to daily backtest
+    # (Would need intraday data to test this)
+
+    # Improvement 4: Dynamic Position Sizing
+    dynamic_sizing_enabled: bool = True
+    # Regime strength multipliers
+    regime_multipliers: dict = field(default_factory=lambda: {
+        "strong_bullish": 1.15,
+        "moderate_bullish": 1.0,
+        "strong_bearish": 1.15,
+        "moderate_bearish": 1.0,
+    })
+    # Technical confirmation multipliers (0-3 confirmations)
+    tech_multipliers: dict = field(default_factory=lambda: {
+        3: 1.05,  # All 3 technicals aligned
+        2: 1.0,   # 2 confirmations - base
+        1: 0.85,  # Weak confirmation
+        0: 0.5,   # No confirmation - very reduced
+    })
+
+
+# Default configuration (all improvements enabled)
+DEFAULT_IMPROVEMENTS = ImprovementConfig()
 
 
 @dataclass
@@ -218,13 +271,51 @@ def get_contract_price(db_path: Path, contract_id: str, trade_date: str) -> Opti
     return {"bid": row[0], "ask": row[1], "mid": (row[0] + row[1]) / 2, "expiry": row[2]}
 
 
+def is_in_earnings_blackout(
+    trade_date: str,
+    earnings_dates: set[str],
+    days_before: int,
+    days_after: int
+) -> bool:
+    """Check if trade_date falls within earnings blackout period."""
+    if not earnings_dates:
+        return False
+
+    try:
+        trade_dt = datetime.strptime(trade_date, "%Y-%m-%d")
+    except ValueError:
+        return False
+
+    for earnings_date in earnings_dates:
+        try:
+            earnings_dt = datetime.strptime(earnings_date, "%Y-%m-%d")
+            days_diff = (trade_dt - earnings_dt).days
+
+            # Within blackout window: X days before to Y days after
+            if -days_before <= days_diff <= days_after:
+                return True
+        except ValueError:
+            continue
+
+    return False
+
+
 async def run_portfolio_simulation(
     symbol: str,
     start_date: str,
     quiver_api_key: str,
     position_size_pct: float,  # e.g., 0.05 for 5%
+    improvements: ImprovementConfig = DEFAULT_IMPROVEMENTS,
 ) -> dict:
-    """Run portfolio simulation with compounding."""
+    """Run portfolio simulation with compounding.
+
+    Args:
+        symbol: Stock symbol to simulate
+        start_date: Start date for simulation
+        quiver_api_key: Quiver API key for WSB sentiment
+        position_size_pct: Base position size as decimal (0.10 = 10%)
+        improvements: Configuration for risk management improvements
+    """
 
     cached_dates = get_cached_dates(symbol)
     if not cached_dates:
@@ -239,6 +330,40 @@ async def run_portfolio_simulation(
         date = item.get("Date", "")[:10]
         if date >= start_date:
             wsb_by_date[date] = item.get("Sentiment", 0)
+
+    # Load historical VIX data if VIX filter enabled
+    vix_by_date = {}
+    if improvements.vix_filter_enabled:
+        vix_client = VIXClient()
+        try:
+            # Load historical data (synchronous call)
+            vix_client.load_historical_data(start_date)
+
+            # Extract VIX levels for each date from the cached data
+            if vix_client._historical_data is not None and not vix_client._historical_data.empty:
+                vix_df = vix_client._historical_data
+
+                # Handle multi-level column index from yfinance
+                if isinstance(vix_df.columns, pd.MultiIndex):
+                    close_col = ("Close", "^VIX")
+                else:
+                    close_col = "Close"
+
+                for idx in vix_df.index:
+                    date_str = idx.strftime("%Y-%m-%d") if hasattr(idx, 'strftime') else str(idx)[:10]
+                    try:
+                        vix_by_date[date_str] = float(vix_df.loc[idx, close_col])
+                    except (KeyError, TypeError):
+                        pass
+        except Exception as e:
+            print(f"Warning: Could not load VIX data: {e}")
+
+    # Load earnings dates if earnings blackout enabled
+    earnings_dates = set()
+    if improvements.earnings_blackout_enabled:
+        # Use historical earnings data for backtesting
+        if symbol in HISTORICAL_EARNINGS:
+            earnings_dates = set(HISTORICAL_EARNINGS[symbol])
 
     end_date = datetime.now().strftime("%Y-%m-%d")
     prices_df = get_price_data(symbol, start_date, end_date)
@@ -349,6 +474,25 @@ async def run_portfolio_simulation(
             if target_direction in open_directions:
                 continue
 
+            # IMPROVEMENT 1: Earnings Blackout Check
+            if improvements.earnings_blackout_enabled:
+                if is_in_earnings_blackout(
+                    date,
+                    earnings_dates,
+                    improvements.earnings_blackout_days_before,
+                    improvements.earnings_blackout_days_after
+                ):
+                    continue  # Skip entry during earnings blackout
+
+            # IMPROVEMENT 2: VIX Regime Filter (Panic blocks entry)
+            vix_position_modifier = 1.0
+            if improvements.vix_filter_enabled:
+                vix_level = vix_by_date.get(date, 20.0)  # Default to normal VIX
+                if vix_level >= improvements.vix_panic_threshold:
+                    continue  # Block entry during VIX panic
+                elif vix_level >= improvements.vix_elevated_threshold:
+                    vix_position_modifier = improvements.vix_elevated_position_modifier
+
             pullback_pct = row.get('pullback_pct', 0)
             bounce_pct = row.get('bounce_pct', 0)
 
@@ -370,7 +514,27 @@ async def run_portfolio_simulation(
                 if contract:
                     # Calculate position size based on current portfolio value
                     portfolio_value = cash + sum(p.current_value for p in open_positions)
-                    position_budget = portfolio_value * position_size_pct
+                    base_position_size = position_size_pct
+
+                    # IMPROVEMENT 4: Dynamic Position Sizing
+                    if improvements.dynamic_sizing_enabled:
+                        # Get regime multiplier
+                        regime_mult = improvements.regime_multipliers.get(regime, 1.0)
+
+                        # Get technical confirmation count and multiplier
+                        is_bullish = "bullish" in regime
+                        tech_count = check_technical_confirmation(row, is_bullish)
+                        tech_mult = improvements.tech_multipliers.get(tech_count, 1.0)
+
+                        # Apply all modifiers
+                        final_size = base_position_size * regime_mult * tech_mult * vix_position_modifier
+
+                        # Clamp to reasonable bounds (50% to 150% of base)
+                        final_size = max(base_position_size * 0.5, min(final_size, base_position_size * 1.5))
+                    else:
+                        final_size = base_position_size * vix_position_modifier
+
+                    position_budget = portfolio_value * final_size
 
                     # Calculate number of contracts (each contract is 100 shares)
                     contract_cost = contract["ask"] * 100
@@ -527,9 +691,9 @@ async def main():
         print("No QUIVER_API_KEY found")
         return
 
-    print("=" * 80)
-    print("PORTFOLIO SIMULATION - MONTHLY COMPARISON")
-    print("=" * 80)
+    print("=" * 100)
+    print("PORTFOLIO SIMULATION WITH RISK MANAGEMENT IMPROVEMENTS")
+    print("=" * 100)
     print()
     print("Strategy Configuration (mirrors live trading):")
     print(f"  Ticker: {symbol}")
@@ -547,13 +711,97 @@ async def main():
     print(f"  Compounding: Yes")
     print()
 
+    # =========================================================================
+    # PART 1: Compare WITH vs WITHOUT improvements at 10% position sizing
+    # =========================================================================
+    print("=" * 100)
+    print("PART 1: IMPROVEMENT COMPARISON (10% Position Size)")
+    print("=" * 100)
+    print()
+
+    # Configuration WITHOUT improvements (baseline)
+    no_improvements = ImprovementConfig(
+        earnings_blackout_enabled=False,
+        vix_filter_enabled=False,
+        dynamic_sizing_enabled=False,
+    )
+
+    # Configuration WITH all improvements
+    with_improvements = DEFAULT_IMPROVEMENTS
+
+    print("Running BASELINE (no improvements)...", end=" ", flush=True)
+    baseline_result = await run_portfolio_simulation(
+        symbol, start_date, quiver_api_key, 0.10, no_improvements
+    )
+    print(f"Done - Final: ${baseline_result['final_value']:,.0f}")
+
+    print("Running WITH IMPROVEMENTS...", end=" ", flush=True)
+    improved_result = await run_portfolio_simulation(
+        symbol, start_date, quiver_api_key, 0.10, with_improvements
+    )
+    print(f"Done - Final: ${improved_result['final_value']:,.0f}")
+
+    # Print comparison table
+    print()
+    print("-" * 70)
+    print(f"{'Metric':<30} {'Baseline':>18} {'Improved':>18}")
+    print("-" * 70)
+    print(f"{'Final Value':<30} ${baseline_result['final_value']:>17,.0f} ${improved_result['final_value']:>17,.0f}")
+    print(f"{'Total Return':<30} {baseline_result['total_return']:>17.1f}% {improved_result['total_return']:>17.1f}%")
+    print(f"{'Max Drawdown $':<30} ${baseline_result['max_dd_dollar']:>17,.0f} ${improved_result['max_dd_dollar']:>17,.0f}")
+    print(f"{'Max Drawdown %':<30} {baseline_result['max_dd_pct']:>17.1f}% {improved_result['max_dd_pct']:>17.1f}%")
+    print(f"{'Sharpe Ratio':<30} {baseline_result['sharpe']:>18.2f} {improved_result['sharpe']:>18.2f}")
+    print(f"{'Total Trades':<30} {baseline_result['trades']:>18} {improved_result['trades']:>18}")
+
+    baseline_wr = baseline_result['winners'] / baseline_result['trades'] * 100 if baseline_result['trades'] else 0
+    improved_wr = improved_result['winners'] / improved_result['trades'] * 100 if improved_result['trades'] else 0
+    print(f"{'Win Rate':<30} {baseline_wr:>17.1f}% {improved_wr:>17.1f}%")
+    print(f"{'Avg P&L/Trade $':<30} ${baseline_result['avg_pnl_dollar']:>17,.0f} ${improved_result['avg_pnl_dollar']:>17,.0f}")
+    print(f"{'Losing Streak (trades)':<30} {baseline_result['max_losing_streak']:>18} {improved_result['max_losing_streak']:>18}")
+    print("-" * 70)
+
+    # Calculate improvement deltas
+    return_delta = improved_result['total_return'] - baseline_result['total_return']
+    dd_delta = improved_result['max_dd_pct'] - baseline_result['max_dd_pct']
+    sharpe_delta = improved_result['sharpe'] - baseline_result['sharpe']
+    trades_delta = improved_result['trades'] - baseline_result['trades']
+
+    print()
+    print("IMPROVEMENT IMPACT:")
+    print(f"  Return change:     {return_delta:+.1f}% ({'better' if return_delta > 0 else 'worse'})")
+    print(f"  Max DD change:     {dd_delta:+.1f}% ({'reduced risk' if dd_delta < 0 else 'increased risk'})")
+    print(f"  Sharpe change:     {sharpe_delta:+.2f} ({'improved' if sharpe_delta > 0 else 'worsened'})")
+    print(f"  Trades blocked:    {-trades_delta} trades filtered out by improvements")
+    print()
+
+    # Show which improvements affected trades
+    if with_improvements.earnings_blackout_enabled:
+        print(f"  Earnings blackout: {with_improvements.earnings_blackout_days_before} days before, "
+              f"{with_improvements.earnings_blackout_days_after} day(s) after")
+    if with_improvements.vix_filter_enabled:
+        print(f"  VIX filter: Block >{with_improvements.vix_panic_threshold}, "
+              f"Reduce >{with_improvements.vix_elevated_threshold}")
+    if with_improvements.dynamic_sizing_enabled:
+        print(f"  Dynamic sizing: Regime + Tech confirmation multipliers")
+    print()
+
+    # =========================================================================
+    # PART 2: Position sizing comparison (WITH improvements)
+    # =========================================================================
+    print("=" * 100)
+    print("PART 2: POSITION SIZING COMPARISON (WITH Improvements)")
+    print("=" * 100)
+    print()
+
     # Test five position sizes (2.5% to 20%)
     position_sizes = [0.025, 0.05, 0.10, 0.15, 0.20]  # 2.5%, 5%, 10%, 15%, 20%
 
     results = []
     for pct in position_sizes:
-        print(f"Running {pct*100:.1f}% position size simulation...", end=" ", flush=True)
-        result = await run_portfolio_simulation(symbol, start_date, quiver_api_key, pct)
+        print(f"Running {pct*100:.1f}% position size...", end=" ", flush=True)
+        result = await run_portfolio_simulation(
+            symbol, start_date, quiver_api_key, pct, with_improvements
+        )
         results.append(result)
         print(f"Done - Final: ${result['final_value']:,.0f}")
 

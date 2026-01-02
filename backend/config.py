@@ -187,6 +187,38 @@ class RegimeStrategyConfig:
 
 
 @dataclass(frozen=True)
+class RiskManagementConfig:
+    """Risk management configuration for the 4 improvements.
+
+    Improvement 1: Earnings Blackout
+    Improvement 2: VIX Regime Filter
+    Improvement 3: Trading Hours Optimization
+    Improvement 4: Dynamic Position Sizing
+    """
+
+    # Improvement 1: Earnings Blackout
+    earnings_blackout_enabled: bool = True
+    earnings_blackout_days_before: int = 5  # Block X days before earnings
+    earnings_blackout_days_after: int = 1  # Block X days after earnings
+
+    # Improvement 2: VIX Regime Filter
+    vix_filter_enabled: bool = True
+    vix_panic_threshold: float = 35.0  # Block entries above this
+    vix_elevated_threshold: float = 25.0  # Reduce position size above this
+
+    # Improvement 3: Trading Hours Optimization
+    trading_hours_enabled: bool = True
+    block_market_open_minutes: int = 30  # Block first X minutes
+    block_market_close_minutes: int = 15  # Block last X minutes
+
+    # Improvement 4: Dynamic Position Sizing
+    dynamic_sizing_enabled: bool = True
+    base_position_size: float = 0.10  # 10% base
+    max_position_size: float = 0.15  # 15% max
+    min_position_size: float = 0.05  # 5% min
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Main application configuration."""
 
@@ -225,6 +257,9 @@ class AppConfig:
 
     # Auto-execution configuration
     auto_execution: AutoExecutionConfig = AutoExecutionConfig()
+
+    # Risk management configuration (4 improvements)
+    risk_management: RiskManagementConfig = RiskManagementConfig()
 
 
 def _get_env_or_raise(key: str) -> str:
@@ -281,5 +316,24 @@ def load_config() -> AppConfig:
             max_positions=int(os.getenv("AUTO_EXECUTE_MAX_POSITIONS", "3")),
             simulation_speed=float(os.getenv("SIMULATION_SPEED", "5.0")),
             simulation_balance=float(os.getenv("SIMULATION_BALANCE", "100000.0")),
+        ),
+        risk_management=RiskManagementConfig(
+            # Improvement 1: Earnings Blackout
+            earnings_blackout_enabled=_get_env_bool("EARNINGS_BLACKOUT_ENABLED", default=True),
+            earnings_blackout_days_before=int(os.getenv("EARNINGS_BLACKOUT_DAYS", "5")),
+            earnings_blackout_days_after=int(os.getenv("EARNINGS_POST_BLACKOUT_DAYS", "1")),
+            # Improvement 2: VIX Regime Filter
+            vix_filter_enabled=_get_env_bool("VIX_ENABLED", default=True),
+            vix_panic_threshold=float(os.getenv("VIX_PANIC_THRESHOLD", "35")),
+            vix_elevated_threshold=float(os.getenv("VIX_ELEVATED_THRESHOLD", "25")),
+            # Improvement 3: Trading Hours Optimization
+            trading_hours_enabled=_get_env_bool("TRADING_HOURS_ENABLED", default=True),
+            block_market_open_minutes=int(os.getenv("BLOCK_MARKET_OPEN_MINUTES", "30")),
+            block_market_close_minutes=int(os.getenv("BLOCK_MARKET_CLOSE_MINUTES", "15")),
+            # Improvement 4: Dynamic Position Sizing
+            dynamic_sizing_enabled=_get_env_bool("DYNAMIC_SIZING_ENABLED", default=True),
+            base_position_size=float(os.getenv("BASE_POSITION_SIZE", "0.10")),
+            max_position_size=float(os.getenv("MAX_POSITION_SIZE", "0.15")),
+            min_position_size=float(os.getenv("MIN_POSITION_SIZE", "0.05")),
         ),
     )

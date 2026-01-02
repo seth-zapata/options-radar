@@ -144,6 +144,23 @@ class GateContext:
     # Technical indicators (Phase 7 - from backtest findings)
     rsi: float | None = None  # RSI value (0-100)
 
+    # Earnings calendar (Improvement 1)
+    days_until_earnings: int | None = None  # Days until next earnings
+    days_since_earnings: int | None = None  # Days since last earnings
+
+    # VIX regime (Improvement 2)
+    vix_level: float | None = None  # Current VIX level
+    vix_position_modifier: float = 1.0  # Position size modifier from VIX
+
+    # Trading hours (Improvement 3)
+    current_time_et: str | None = None  # Current time in ET (HH:MM)
+    minutes_since_open: int | None = None  # Minutes since market open
+    minutes_until_close: int | None = None  # Minutes until market close
+
+    # Signal strength for dynamic sizing (Improvement 4)
+    regime_strength: str | None = None  # "strong", "moderate", "weak"
+    technical_confirmations: int = 0  # Number of technical indicators confirming (0-3)
+
 
 class Gate(ABC):
     """Abstract base class for gates.
@@ -1051,6 +1068,365 @@ class StrongSentimentBoostGate(Gate):
 
 
 # =============================================================================
+# Stage 8: Risk Management Gates (New Improvements)
+# =============================================================================
+
+class EarningsBlackoutGate(Gate):
+    """HARD gate: Block entries within X days of earnings.
+
+    TSLA earnings can gap 10-20% overnight, turning winners into total losses.
+    Binary event risk is not worth taking.
+
+    Thresholds:
+    - BLACKOUT_DAYS_BEFORE: Block X days before earnings (default 5)
+    - BLACKOUT_DAYS_AFTER: Block X days after earnings (default 1)
+    """
+
+    BLACKOUT_DAYS_BEFORE = 5  # Block entries 5 days before earnings
+    BLACKOUT_DAYS_AFTER = 1  # Block entries 1 day after earnings
+
+    def __init__(
+        self,
+        blackout_before: int = 5,
+        blackout_after: int = 1,
+        enabled: bool = True,
+    ):
+        self._blackout_before = blackout_before
+        self._blackout_after = blackout_after
+        self._enabled = enabled
+
+    @property
+    def name(self) -> str:
+        return "earnings_blackout"
+
+    @property
+    def severity(self) -> GateSeverity:
+        return GateSeverity.HARD
+
+    def evaluate(self, ctx: GateContext) -> GateResult:
+        # Skip if disabled
+        if not self._enabled:
+            return GateResult(
+                gate_name=self.name,
+                passed=True,
+                value=None,
+                threshold="disabled",
+                message="Earnings blackout disabled",
+                severity=self.severity,
+            )
+
+        # Check days until earnings
+        if ctx.days_until_earnings is not None:
+            if ctx.days_until_earnings <= self._blackout_before:
+                return GateResult(
+                    gate_name=self.name,
+                    passed=False,
+                    value=ctx.days_until_earnings,
+                    threshold=f"> {self._blackout_before} days",
+                    message=f"BLOCKED: {ctx.underlying_symbol} earnings in {ctx.days_until_earnings} days",
+                    severity=self.severity,
+                )
+
+        # Check days since earnings
+        if ctx.days_since_earnings is not None:
+            if ctx.days_since_earnings <= self._blackout_after:
+                return GateResult(
+                    gate_name=self.name,
+                    passed=False,
+                    value=ctx.days_since_earnings,
+                    threshold=f"> {self._blackout_after} days since",
+                    message=f"BLOCKED: {ctx.underlying_symbol} earnings was {ctx.days_since_earnings} day(s) ago, post-earnings blackout",
+                    severity=self.severity,
+                )
+
+        # No earnings data or outside blackout
+        days_msg = f"{ctx.days_until_earnings}d until" if ctx.days_until_earnings else "unknown"
+        return GateResult(
+            gate_name=self.name,
+            passed=True,
+            value=ctx.days_until_earnings,
+            threshold=f"> {self._blackout_before} days",
+            message=f"OK: earnings {days_msg}",
+            severity=self.severity,
+        )
+
+
+class VIXPanicGate(Gate):
+    """HARD gate: Block entries when VIX > panic threshold.
+
+    During market panic (VIX > 35), correlations go to 1 and even good signals fail.
+    This is a HARD gate that completely blocks entries in panic mode.
+    """
+
+    PANIC_THRESHOLD = 35.0  # VIX above this = block entries
+
+    def __init__(self, panic_threshold: float = 35.0, enabled: bool = True):
+        self._panic_threshold = panic_threshold
+        self._enabled = enabled
+
+    @property
+    def name(self) -> str:
+        return "vix_panic"
+
+    @property
+    def severity(self) -> GateSeverity:
+        return GateSeverity.HARD
+
+    def evaluate(self, ctx: GateContext) -> GateResult:
+        if not self._enabled:
+            return GateResult(
+                gate_name=self.name,
+                passed=True,
+                value=None,
+                threshold="disabled",
+                message="VIX panic gate disabled",
+                severity=self.severity,
+            )
+
+        if ctx.vix_level is None:
+            # No VIX data - assume normal
+            return GateResult(
+                gate_name=self.name,
+                passed=True,
+                value=None,
+                threshold=f"< {self._panic_threshold}",
+                message="VIX data unavailable, assuming normal",
+                severity=self.severity,
+            )
+
+        passed = ctx.vix_level < self._panic_threshold
+        return GateResult(
+            gate_name=self.name,
+            passed=passed,
+            value=ctx.vix_level,
+            threshold=f"< {self._panic_threshold}",
+            message=f"OK: VIX at {ctx.vix_level:.1f}" if passed else f"BLOCKED: VIX at {ctx.vix_level:.1f} - PANIC mode",
+            severity=self.severity,
+        )
+
+
+class VIXElevatedModifier(Gate):
+    """SOFT gate: Position size modifier for elevated VIX.
+
+    When VIX is between elevated and panic thresholds, reduce position size to 50%.
+    This gate always passes but provides the vix_position_modifier in the context.
+
+    | VIX Level | Regime   | Position Modifier |
+    |-----------|----------|-------------------|
+    | < 15      | low      | 1.0 (100%)        |
+    | 15-25     | normal   | 1.0 (100%)        |
+    | 25-35     | elevated | 0.5 (50%)         |
+    | > 35      | panic    | 0.0 (blocked)     |
+    """
+
+    ELEVATED_THRESHOLD = 25.0
+    PANIC_THRESHOLD = 35.0
+
+    def __init__(
+        self,
+        elevated_threshold: float = 25.0,
+        panic_threshold: float = 35.0,
+        enabled: bool = True,
+    ):
+        self._elevated_threshold = elevated_threshold
+        self._panic_threshold = panic_threshold
+        self._enabled = enabled
+
+    @property
+    def name(self) -> str:
+        return "vix_elevated_modifier"
+
+    @property
+    def severity(self) -> GateSeverity:
+        return GateSeverity.SOFT
+
+    def evaluate(self, ctx: GateContext) -> GateResult:
+        if not self._enabled or ctx.vix_level is None:
+            return GateResult(
+                gate_name=self.name,
+                passed=True,
+                value=1.0,
+                threshold=f"VIX < {self._elevated_threshold}",
+                message="VIX modifier: 1.0 (disabled or no data)",
+                severity=self.severity,
+            )
+
+        if ctx.vix_level >= self._panic_threshold:
+            modifier = 0.0
+            regime = "PANIC"
+        elif ctx.vix_level >= self._elevated_threshold:
+            modifier = 0.5
+            regime = "ELEVATED"
+        else:
+            modifier = 1.0
+            regime = "NORMAL"
+
+        return GateResult(
+            gate_name=self.name,
+            passed=True,  # Always passes - just provides modifier
+            value=modifier,
+            threshold=f"VIX < {self._elevated_threshold} for full size",
+            message=f"VIX {ctx.vix_level:.1f} - {regime} mode, position modifier: {modifier}",
+            severity=self.severity,
+        )
+
+
+class TradingHoursGate(Gate):
+    """HARD gate: Block entries during noisy market periods.
+
+    Market microstructure research shows:
+    - 9:30-10:00 ET: Opening auction - wide spreads, false breakouts
+    - 15:45-16:00 ET: Closing auction - MOC imbalances, unpredictable
+
+    This gate blocks entries during these periods.
+    """
+
+    BLOCK_OPEN_MINUTES = 30  # Block first 30 mins after open
+    BLOCK_CLOSE_MINUTES = 15  # Block last 15 mins before close
+
+    def __init__(
+        self,
+        block_open_minutes: int = 30,
+        block_close_minutes: int = 15,
+        enabled: bool = True,
+    ):
+        self._block_open_minutes = block_open_minutes
+        self._block_close_minutes = block_close_minutes
+        self._enabled = enabled
+
+    @property
+    def name(self) -> str:
+        return "trading_hours"
+
+    @property
+    def severity(self) -> GateSeverity:
+        return GateSeverity.HARD
+
+    def evaluate(self, ctx: GateContext) -> GateResult:
+        if not self._enabled:
+            return GateResult(
+                gate_name=self.name,
+                passed=True,
+                value=None,
+                threshold="disabled",
+                message="Trading hours gate disabled",
+                severity=self.severity,
+            )
+
+        # Check if we have time data
+        if ctx.minutes_since_open is None or ctx.minutes_until_close is None:
+            return GateResult(
+                gate_name=self.name,
+                passed=True,
+                value=None,
+                threshold="no time data",
+                message="Time data unavailable, allowing trade",
+                severity=self.severity,
+            )
+
+        # Block during opening period
+        if ctx.minutes_since_open < self._block_open_minutes:
+            return GateResult(
+                gate_name=self.name,
+                passed=False,
+                value=ctx.minutes_since_open,
+                threshold=f">= {self._block_open_minutes} mins after open",
+                message=f"BLOCKED: Market opened {ctx.minutes_since_open} mins ago, waiting until 10:00 ET",
+                severity=self.severity,
+            )
+
+        # Block during closing period
+        if ctx.minutes_until_close < self._block_close_minutes:
+            return GateResult(
+                gate_name=self.name,
+                passed=False,
+                value=ctx.minutes_until_close,
+                threshold=f">= {self._block_close_minutes} mins before close",
+                message=f"BLOCKED: Only {ctx.minutes_until_close} mins until close ({ctx.current_time_et} ET)",
+                severity=self.severity,
+            )
+
+        return GateResult(
+            gate_name=self.name,
+            passed=True,
+            value=ctx.minutes_since_open,
+            threshold=f"open period: {self._block_open_minutes}m, close period: {self._block_close_minutes}m",
+            message=f"OK: Normal trading hours ({ctx.current_time_et} ET)",
+            severity=self.severity,
+        )
+
+
+class TradingHoursBoostGate(Gate):
+    """SOFT gate: Confidence boost during optimal trading hours.
+
+    Based on market microstructure research:
+    - 10:00-11:30 ET (Prime time): Trends establish, best signals - +5 confidence
+    - 14:00-15:00 ET (Afternoon): Institutional positioning - +3 confidence
+    - Other times: No adjustment
+    """
+
+    PRIME_START = 30  # 30 mins after open (10:00 ET)
+    PRIME_END = 120  # 120 mins after open (11:30 ET)
+    AFTERNOON_START = 270  # 270 mins after open (14:00 ET)
+    AFTERNOON_END = 330  # 330 mins after open (15:00 ET)
+
+    def __init__(self, enabled: bool = True):
+        self._enabled = enabled
+
+    @property
+    def name(self) -> str:
+        return "trading_hours_boost"
+
+    @property
+    def severity(self) -> GateSeverity:
+        return GateSeverity.SOFT
+
+    def evaluate(self, ctx: GateContext) -> GateResult:
+        if not self._enabled or ctx.minutes_since_open is None:
+            return GateResult(
+                gate_name=self.name,
+                passed=True,
+                value=0,
+                threshold="optimal hours",
+                message="Trading hours boost disabled or no time data",
+                severity=self.severity,
+            )
+
+        mins = ctx.minutes_since_open
+
+        # Prime time: 10:00-11:30 ET
+        if self.PRIME_START <= mins <= self.PRIME_END:
+            return GateResult(
+                gate_name=self.name,
+                passed=True,
+                value=5,
+                threshold="10:00-11:30 ET",
+                message=f"Prime time ({ctx.current_time_et} ET), +5 confidence",
+                severity=self.severity,
+            )
+
+        # Afternoon session: 14:00-15:00 ET
+        if self.AFTERNOON_START <= mins <= self.AFTERNOON_END:
+            return GateResult(
+                gate_name=self.name,
+                passed=True,
+                value=3,
+                threshold="14:00-15:00 ET",
+                message=f"Afternoon session ({ctx.current_time_et} ET), +3 confidence",
+                severity=self.severity,
+            )
+
+        return GateResult(
+            gate_name=self.name,
+            passed=True,
+            value=0,
+            threshold="optimal hours",
+            message=f"Normal hours ({ctx.current_time_et} ET), no boost",
+            severity=self.severity,
+        )
+
+
+# =============================================================================
 # Gate Registry
 # =============================================================================
 
@@ -1099,6 +1475,19 @@ TECHNICAL_GATES: list[Gate] = [
     RSIOverboughtGate(),  # HARD: Block RSI > 70 + bullish (43.8% accuracy = negative EV)
 ]
 
+# Risk management gates - new improvements
+RISK_MANAGEMENT_GATES: list[Gate] = [
+    EarningsBlackoutGate(),  # HARD: Block entries near earnings
+    VIXPanicGate(),          # HARD: Block entries when VIX > 35
+    TradingHoursGate(),      # HARD: Block entries during open/close chaos
+]
+
+# Position size modifiers - affect position sizing, not pass/fail
+POSITION_MODIFIER_GATES: list[Gate] = [
+    VIXElevatedModifier(),   # SOFT: Reduce size when VIX 25-35
+    TradingHoursBoostGate(), # SOFT: Confidence boost during prime time
+]
+
 # All gates in pipeline order
 ALL_GATES: list[Gate] = (
     DATA_FRESHNESS_GATES +
@@ -1107,7 +1496,9 @@ ALL_GATES: list[Gate] = (
     PORTFOLIO_CONSTRAINT_GATES +
     SIGNAL_QUALITY_GATES +
     SENTIMENT_GATES +
-    TECHNICAL_GATES
+    TECHNICAL_GATES +
+    RISK_MANAGEMENT_GATES +
+    POSITION_MODIFIER_GATES
 )
 
 
