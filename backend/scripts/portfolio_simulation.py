@@ -685,8 +685,24 @@ async def run_portfolio_simulation(
 
 
 async def main():
-    symbol = "TSLA"
-    start_date = "2024-01-01"
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description="Portfolio simulation with risk management improvements"
+    )
+    parser.add_argument(
+        "--symbol", "-s",
+        default="TSLA",
+        help="Stock symbol to simulate (default: TSLA)"
+    )
+    parser.add_argument(
+        "--start",
+        default="2024-01-01",
+        help="Start date for simulation in YYYY-MM-DD format (default: 2024-01-01)"
+    )
+    args = parser.parse_args()
+
+    symbol = args.symbol
+    start_date = args.start
 
     quiver_api_key = os.getenv("QUIVER_API_KEY")
     if not quiver_api_key:
@@ -699,6 +715,7 @@ async def main():
     print()
     print("Strategy Configuration (mirrors live trading):")
     print(f"  Ticker: {symbol}")
+    print(f"  Start date: {start_date}")
     print(f"  Regime window: {REGIME_WINDOW} days")
     print(f"  Pullback threshold: {PULLBACK_THRESHOLD}%")
     print(f"  DTE: {TARGET_DTE} days")
