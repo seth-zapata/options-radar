@@ -121,6 +121,7 @@ class Position:
     entry_ask: float
     contracts: int
     position_value: float  # Initial position value
+    position_size_pct: float = 0.0  # Actual position size % used (for dynamic sizing)
     current_value: float = 0.0
     exit_date: str = ""
     exit_reason: str = ""
@@ -550,6 +551,7 @@ async def run_portfolio_simulation(
                             entry_ask=contract["ask"],
                             contracts=num_contracts,
                             position_value=actual_cost,
+                            position_size_pct=final_size * 100,  # Store as percentage
                             current_value=actual_cost,
                         )
                         open_positions.append(pos)
@@ -1049,12 +1051,13 @@ async def main():
     print(f"TRADE LOG ({ref_pct} Position Sizing)")
     print("=" * 100)
     print()
-    print(f"{'Entry':<12} {'Type':<6} {'Regime':<18} {'Contracts':>9} {'P&L $':>10} {'P&L %':>8} {'Exit Reason':<12}")
-    print("-" * 85)
+    print(f"{'Entry':<12} {'Type':<6} {'Regime':<18} {'Size':>7} {'Contracts':>9} {'P&L $':>10} {'P&L %':>8} {'Exit Reason':<12}")
+    print("-" * 95)
 
     for pos in sorted(ref_result['positions'], key=lambda x: x.entry_date):
         regime_short = pos.regime_type.replace("_", " ").title()[:15]
-        print(f"{pos.entry_date:<12} {pos.option_type:<6} {regime_short:<18} {pos.contracts:>9} ${pos.pnl_dollar:>+9,.0f} {pos.pnl_pct:>+7.1f}% {pos.exit_reason:<12}")
+        size_str = f"{pos.position_size_pct:.1f}%"
+        print(f"{pos.entry_date:<12} {pos.option_type:<6} {regime_short:<18} {size_str:>7} {pos.contracts:>9} ${pos.pnl_dollar:>+9,.0f} {pos.pnl_pct:>+7.1f}% {pos.exit_reason:<12}")
 
     # Recommendation
     print()
