@@ -112,10 +112,11 @@ class ImprovementConfig:
     # DUAL-REGIME: Generate momentum PUT signals during bear markets
     # Instead of just blocking CALLs, actively generate PUT signals
     dual_regime_enabled: bool = True
-    momentum_bounce_threshold: float = 0.03  # 3% bounce from low required
+    momentum_bounce_threshold: float = 0.02  # 2% bounce from low required (was 3%)
     momentum_bounce_lookback: int = 5  # Days to look for recent low
-    momentum_resistance_proximity: float = 0.02  # Within 2% of 50-day SMA
+    momentum_resistance_proximity: float = 0.05  # Within 5% of 50-day SMA (was 2%)
     momentum_oversold_rsi: float = 25.0  # Don't short below this RSI
+    momentum_min_tech_confirmations: int = 2  # Require at least 2/3 for quality signals
     # Regime strength multipliers
     regime_multipliers: dict = field(default_factory=lambda: {
         "strong_bullish": 1.15,
@@ -486,6 +487,7 @@ async def run_portfolio_simulation(
             bounce_lookback_days=improvements.momentum_bounce_lookback,
             resistance_proximity=improvements.momentum_resistance_proximity,
             oversold_rsi=improvements.momentum_oversold_rsi,
+            min_tech_confirmations=improvements.momentum_min_tech_confirmations,
             enabled=True,
         )
         momentum_generator = MomentumSignalGenerator(momentum_config)

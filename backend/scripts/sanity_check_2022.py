@@ -744,8 +744,14 @@ async def run_sanity_check():
         print()
         print("  Sample Momentum PUT signals:")
         for s in momentum_signals[:5]:
-            direction = "Correct" if s.correct_direction else "Wrong" if s.correct_direction is False else "Unknown"
-            print(f"    {s.date}: ${s.price_at_signal:.2f} -> ${s.price_after_7d:.2f if s.price_after_7d else 'N/A'} ({direction})")
+            if s.correct_direction is None:
+                direction = "Unknown"
+            elif s.correct_direction == True:
+                direction = "Correct"
+            else:
+                direction = "Wrong"
+            price_after = f"${s.price_after_7d:.2f}" if s.price_after_7d else "N/A"
+            print(f"    {s.date}: ${s.price_at_signal:.2f} -> {price_after} ({direction})")
     else:
         print("    (No momentum signals generated - conditions not met)")
     print()

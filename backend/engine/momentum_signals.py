@@ -52,16 +52,19 @@ class MomentumSignal:
 class MomentumSignalConfig:
     """Configuration for momentum signal generation."""
 
-    # Bounce detection
-    bounce_threshold: float = 0.03  # 3% bounce from low required
+    # Bounce detection - identifies relief rally to sell into
+    bounce_threshold: float = 0.02  # 2% bounce from low required (was 3%)
     bounce_lookback_days: int = 5  # Days to look back for recent low
 
-    # Resistance detection
-    resistance_proximity: float = 0.02  # Within 2% of 50-day SMA
+    # Resistance detection - price approaching 50-day SMA from below
+    resistance_proximity: float = 0.05  # Within 5% of 50-day SMA (was 2%)
 
     # RSI thresholds
     oversold_rsi: float = 25.0  # Don't short below this (capitulation risk)
     neutral_rsi: float = 50.0  # Above this is bearish for PUTs
+
+    # Technical confirmation requirement
+    min_tech_confirmations: int = 2  # Require at least 2/3 for quality signals
 
     # Enabled flag
     enabled: bool = True
@@ -319,8 +322,8 @@ class MomentumSignalGenerator:
             logger.debug(f"{symbol}: Oversold RSI detected in technicals")
             return None
 
-        if tech_count < 2:
-            logger.debug(f"{symbol}: Only {tech_count}/3 technical confirmations (need 2)")
+        if tech_count < self.config.min_tech_confirmations:
+            logger.debug(f"{symbol}: Only {tech_count}/3 technical confirmations (need {self.config.min_tech_confirmations})")
             return None
 
         reasons.extend(tech_reasons)
