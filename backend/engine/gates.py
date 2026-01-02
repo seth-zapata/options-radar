@@ -167,6 +167,8 @@ class GateContext:
     sma_200: float | None = None  # 200-day SMA
     price_vs_sma_200_pct: float | None = None  # % above/below 200-day SMA
     days_below_sma_200: int = 0  # Consecutive days below 200 SMA
+    sma_50: float | None = None  # 50-day SMA (for trend confirmation)
+    price_vs_sma_50_pct: float | None = None  # % above/below 50-day SMA
     death_cross_active: bool = False  # True if 50 SMA < 200 SMA
     death_cross_date: str | None = None  # Date of death cross (if active)
     bear_market_detected: bool = False  # True if any bear indicator triggered
@@ -1444,14 +1446,19 @@ class PriceSentimentDivergenceGate(Gate):
     all the way down. The 2022 sanity check showed 36 CALL signals with only
     38.9% accuracy because WSB stayed bullish during a -69% crash.
 
-    Bear market indicators (any ONE triggers detection):
-    1. Price > 20% below 52-week high
-    2. Price > 5% below 200-day SMA for 10+ consecutive days
-    3. Death cross (50 SMA < 200 SMA) within last 60 days
+    Bear market detection with RECOVERY MODE:
+    - Conditions 1 & 2 now require trend confirmation (below 50-day SMA)
+    - If in bear territory but ABOVE 50-day SMA = RECOVERY MODE (allow CALL)
+
+    Block CALL signals only if:
+    1. (Price > 20% below 52-week high) AND (Price < 50-day SMA)
+    2. (Price > 5% below 200-day SMA for 10+ days) AND (Price < 50-day SMA)
+    3. Death cross active (50 SMA < 200 SMA) - inherently includes trend info
 
     Logic:
     - If bear market detected AND signal is bullish (CALL): BLOCK
     - If bear market detected AND signal is bearish (PUT): ALLOW
+    - If recovery mode (bear territory but uptrend): ALLOW
     - If no bear market detected: ALLOW
     """
 
@@ -1478,26 +1485,56 @@ class PriceSentimentDivergenceGate(Gate):
         return GateSeverity.HARD
 
     def _detect_bear_market(self, ctx: GateContext) -> tuple[bool, str]:
-        """Detect bear market from context indicators.
+        """Detect bear market from context indicators with recovery mode.
+
+        REFINED LOGIC: Now requires trend confirmation (price below 50-day SMA)
+        for drawdown and 200-SMA conditions. This allows recovery trades when
+        stock is in bear territory but trending up.
 
         Returns:
             (is_bear_market, reason)
         """
-        # Check 1: Drawdown from 52-week high
+        # Determine trend direction from 50-day SMA
+        # Recovery mode requires price > 5% above 50-day SMA to confirm uptrend
+        in_downtrend = False
+        in_recovery = False
+        if ctx.price_vs_sma_50_pct is not None:
+            in_downtrend = ctx.price_vs_sma_50_pct < 0  # Below 50-day SMA
+            in_recovery = ctx.price_vs_sma_50_pct >= 5.0  # At least 5% above 50-day SMA
+
+        # Check 1: Death cross active WITH trend confirmation
+        # Death cross is a lagging indicator - it can stay active during recovery
+        # Only block if death cross AND price below 50-day SMA (still in downtrend)
+        if ctx.death_cross_active:
+            if in_downtrend:
+                return (True, f"Death cross active (50 SMA < 200 SMA) AND below 50-day SMA (downtrend)")
+            elif in_recovery:
+                # RECOVERY MODE: Death cross exists but price is above 50-day SMA
+                pass  # Don't block - price is recovering
+
+        # Check 2: Drawdown from 52-week high WITH trend confirmation
         if ctx.price_vs_52w_high_pct is not None:
             drawdown = ctx.price_vs_52w_high_pct / 100.0  # Convert to ratio
-            if (1 + drawdown) < self._drawdown_threshold:  # e.g., -25% means 0.75 < 0.80
-                return (True, f"{abs(ctx.price_vs_52w_high_pct):.1f}% below 52-week high")
+            in_bear_territory = (1 + drawdown) < self._drawdown_threshold
 
-        # Check 2: Sustained below 200-day SMA
+            if in_bear_territory:
+                if in_downtrend:
+                    return (True, f"{abs(ctx.price_vs_52w_high_pct):.1f}% below 52-week high AND below 50-day SMA (downtrend)")
+                elif in_recovery:
+                    # RECOVERY MODE: Bear territory but trending up - ALLOW
+                    return (False, f"Recovery mode: {abs(ctx.price_vs_52w_high_pct):.1f}% below 52-week high BUT above 50-day SMA (uptrend)")
+
+        # Check 3: Sustained below 200-day SMA WITH trend confirmation
         if ctx.price_vs_sma_200_pct is not None and ctx.days_below_sma_200 > 0:
             sma_ratio = 1 + (ctx.price_vs_sma_200_pct / 100.0)
-            if sma_ratio < self._sma_threshold and ctx.days_below_sma_200 >= self._sma_days_required:
-                return (True, f"Below 200-day SMA for {ctx.days_below_sma_200} days")
+            sustained_below_200 = sma_ratio < self._sma_threshold and ctx.days_below_sma_200 >= self._sma_days_required
 
-        # Check 3: Death cross active
-        if ctx.death_cross_active and ctx.death_cross_date:
-            return (True, f"Death cross active since {ctx.death_cross_date}")
+            if sustained_below_200:
+                if in_downtrend:
+                    return (True, f"Below 200-day SMA for {ctx.days_below_sma_200} days AND below 50-day SMA (downtrend)")
+                elif in_recovery:
+                    # RECOVERY MODE: Below 200 SMA but trending up - ALLOW
+                    return (False, f"Recovery mode: Below 200-day SMA BUT above 50-day SMA (uptrend)")
 
         return (False, "No bear market detected")
 

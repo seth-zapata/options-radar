@@ -326,6 +326,9 @@ def check_bear_market_divergence(
     Only blocks CALL signals when bear market indicators are triggered.
     PUT signals are allowed (aligned with bearish price action).
 
+    RECOVERY MODE: If in bear territory but above 50-day SMA (uptrend),
+    ALLOW the signal. This prevents blocking valid recovery trades.
+
     Args:
         symbol: Stock symbol
         trade_date: Date to check (YYYY-MM-DD)
@@ -346,14 +349,31 @@ def check_bear_market_divergence(
     try:
         check_date = date.fromisoformat(trade_date)
 
-        # Check 1: 52-week high drawdown
+        # Get 50-day SMA for trend confirmation (recovery mode)
+        # Recovery requires price > 5% above 50-day SMA to confirm uptrend
+        sma_50 = get_sma(symbol, 50, as_of_date=check_date)
+        in_downtrend = sma_50 and current_price and (current_price < sma_50)
+        in_recovery = sma_50 and current_price and (current_price >= sma_50 * 1.05)
+
+        # Check 1: Death cross active WITH trend confirmation
+        # Death cross is a lagging indicator - can stay active during recovery
+        if is_death_cross_active(symbol, as_of_date=check_date):
+            if in_downtrend:
+                return True  # Block - death cross AND downtrend
+            elif in_recovery:
+                pass  # RECOVERY MODE - don't block
+
+        # Check 2: 52-week high drawdown WITH trend confirmation
         high_52w = get_52_week_high(symbol, as_of_date=check_date)
         if high_52w and current_price:
             drawdown_ratio = current_price / high_52w
             if drawdown_ratio < improvements.bear_drawdown_threshold:
-                return True  # Block - significant drawdown
+                if in_downtrend:
+                    return True  # Block - significant drawdown AND downtrend
+                elif in_recovery:
+                    pass  # RECOVERY MODE - don't block
 
-        # Check 2: Sustained below 200-day SMA
+        # Check 3: Sustained below 200-day SMA WITH trend confirmation
         sma_200 = get_sma(symbol, 200, as_of_date=check_date)
         if sma_200 and current_price:
             sma_ratio = current_price / sma_200
@@ -363,11 +383,10 @@ def check_bear_market_divergence(
                     threshold_ratio=improvements.bear_sma_threshold
                 )
                 if days_below >= improvements.bear_sma_days_required:
-                    return True  # Block - sustained below SMA
-
-        # Check 3: Death cross active
-        if is_death_cross_active(symbol, as_of_date=check_date):
-            return True  # Block - death cross
+                    if in_downtrend:
+                        return True  # Block - sustained below SMA AND downtrend
+                    elif in_recovery:
+                        pass  # RECOVERY MODE - don't block
 
     except Exception:
         # If we can't check, don't block
