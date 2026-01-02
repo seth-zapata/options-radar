@@ -161,6 +161,17 @@ class GateContext:
     regime_strength: str | None = None  # "strong", "moderate", "weak"
     technical_confirmations: int = 0  # Number of technical indicators confirming (0-3)
 
+    # Bear market indicators (Price-Sentiment Divergence Gate)
+    price_52w_high: float | None = None  # 52-week high price
+    price_vs_52w_high_pct: float | None = None  # % below 52-week high (negative = drawdown)
+    sma_200: float | None = None  # 200-day SMA
+    price_vs_sma_200_pct: float | None = None  # % above/below 200-day SMA
+    days_below_sma_200: int = 0  # Consecutive days below 200 SMA
+    death_cross_active: bool = False  # True if 50 SMA < 200 SMA
+    death_cross_date: str | None = None  # Date of death cross (if active)
+    bear_market_detected: bool = False  # True if any bear indicator triggered
+    bear_market_reason: str | None = None  # Reason for bear market detection
+
 
 class Gate(ABC):
     """Abstract base class for gates.
@@ -1426,6 +1437,125 @@ class TradingHoursBoostGate(Gate):
         )
 
 
+class PriceSentimentDivergenceGate(Gate):
+    """HARD gate: Block trades when price indicates bear market but sentiment is bullish.
+
+    This protects against 2022-style scenarios where retail buys the dip
+    all the way down. The 2022 sanity check showed 36 CALL signals with only
+    38.9% accuracy because WSB stayed bullish during a -69% crash.
+
+    Bear market indicators (any ONE triggers detection):
+    1. Price > 20% below 52-week high
+    2. Price > 5% below 200-day SMA for 10+ consecutive days
+    3. Death cross (50 SMA < 200 SMA) within last 60 days
+
+    Logic:
+    - If bear market detected AND signal is bullish (CALL): BLOCK
+    - If bear market detected AND signal is bearish (PUT): ALLOW
+    - If no bear market detected: ALLOW
+    """
+
+    def __init__(
+        self,
+        drawdown_threshold: float = 0.80,  # 20% below 52-week high
+        sma_threshold: float = 0.95,  # 5% below 200-day SMA
+        sma_days_required: int = 10,  # Consecutive days below SMA
+        death_cross_lookback: int = 60,  # Days since cross to consider active
+        enabled: bool = True,
+    ):
+        self._drawdown_threshold = drawdown_threshold
+        self._sma_threshold = sma_threshold
+        self._sma_days_required = sma_days_required
+        self._death_cross_lookback = death_cross_lookback
+        self._enabled = enabled
+
+    @property
+    def name(self) -> str:
+        return "price_sentiment_divergence"
+
+    @property
+    def severity(self) -> GateSeverity:
+        return GateSeverity.HARD
+
+    def _detect_bear_market(self, ctx: GateContext) -> tuple[bool, str]:
+        """Detect bear market from context indicators.
+
+        Returns:
+            (is_bear_market, reason)
+        """
+        # Check 1: Drawdown from 52-week high
+        if ctx.price_vs_52w_high_pct is not None:
+            drawdown = ctx.price_vs_52w_high_pct / 100.0  # Convert to ratio
+            if (1 + drawdown) < self._drawdown_threshold:  # e.g., -25% means 0.75 < 0.80
+                return (True, f"{abs(ctx.price_vs_52w_high_pct):.1f}% below 52-week high")
+
+        # Check 2: Sustained below 200-day SMA
+        if ctx.price_vs_sma_200_pct is not None and ctx.days_below_sma_200 > 0:
+            sma_ratio = 1 + (ctx.price_vs_sma_200_pct / 100.0)
+            if sma_ratio < self._sma_threshold and ctx.days_below_sma_200 >= self._sma_days_required:
+                return (True, f"Below 200-day SMA for {ctx.days_below_sma_200} days")
+
+        # Check 3: Death cross active
+        if ctx.death_cross_active and ctx.death_cross_date:
+            return (True, f"Death cross active since {ctx.death_cross_date}")
+
+        return (False, "No bear market detected")
+
+    def evaluate(self, ctx: GateContext) -> GateResult:
+        # Skip if disabled
+        if not self._enabled:
+            return GateResult(
+                gate_name=self.name,
+                passed=True,
+                value=None,
+                threshold="disabled",
+                message="Price-sentiment divergence gate disabled",
+                severity=self.severity,
+            )
+
+        # Use pre-computed bear market detection if available
+        if ctx.bear_market_detected:
+            is_bear = True
+            bear_reason = ctx.bear_market_reason or "Bear market indicators triggered"
+        else:
+            is_bear, bear_reason = self._detect_bear_market(ctx)
+
+        if not is_bear:
+            return GateResult(
+                gate_name=self.name,
+                passed=True,
+                value=None,
+                threshold="no divergence",
+                message="No price-sentiment divergence detected",
+                severity=self.severity,
+            )
+
+        # Bear market detected - check if signal direction is bullish
+        is_bullish_signal = ctx.action in ("BUY_CALL", "SELL_PUT")
+
+        if is_bullish_signal:
+            # DIVERGENCE: Price bearish, sentiment bullish - BLOCK
+            return GateResult(
+                gate_name=self.name,
+                passed=False,
+                value=ctx.price_vs_52w_high_pct,
+                threshold="bear market + bullish signal",
+                message=f"BLOCKED: {bear_reason}, but sentiment is bullish. "
+                        f"Price-sentiment divergence - abstaining from CALL trade.",
+                severity=self.severity,
+            )
+        else:
+            # Sentiment aligned with price - allow PUT trades
+            return GateResult(
+                gate_name=self.name,
+                passed=True,
+                value=ctx.price_vs_52w_high_pct,
+                threshold="aligned",
+                message=f"{bear_reason}, sentiment is bearish (aligned). PUT trade allowed.",
+                severity=self.severity,
+            )
+
+
 # =============================================================================
 # Gate Registry
 # =============================================================================
@@ -1477,9 +1607,10 @@ TECHNICAL_GATES: list[Gate] = [
 
 # Risk management gates - new improvements
 RISK_MANAGEMENT_GATES: list[Gate] = [
-    EarningsBlackoutGate(),  # HARD: Block entries near earnings
-    VIXPanicGate(),          # HARD: Block entries when VIX > 35
-    TradingHoursGate(),      # HARD: Block entries during open/close chaos
+    EarningsBlackoutGate(),           # HARD: Block entries near earnings
+    VIXPanicGate(),                   # HARD: Block entries when VIX > 35
+    TradingHoursGate(),               # HARD: Block entries during open/close chaos
+    PriceSentimentDivergenceGate(),   # HARD: Block bullish signals in bear markets
 ]
 
 # Position size modifiers - affect position sizing, not pass/fail

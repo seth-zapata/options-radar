@@ -188,12 +188,13 @@ class RegimeStrategyConfig:
 
 @dataclass(frozen=True)
 class RiskManagementConfig:
-    """Risk management configuration for the 4 improvements.
+    """Risk management configuration for the 5 improvements.
 
     Improvement 1: Earnings Blackout
     Improvement 2: VIX Regime Filter
     Improvement 3: Trading Hours Optimization
     Improvement 4: Dynamic Position Sizing
+    Improvement 5: Price-Sentiment Divergence (Bear Market Protection)
     """
 
     # Improvement 1: Earnings Blackout
@@ -216,6 +217,14 @@ class RiskManagementConfig:
     base_position_size: float = 0.10  # 10% base
     max_position_size: float = 0.15  # 15% max
     min_position_size: float = 0.05  # 5% min
+
+    # Improvement 5: Price-Sentiment Divergence (Bear Market Protection)
+    # Blocks bullish signals when price action indicates bear market
+    price_sentiment_divergence_enabled: bool = True
+    bear_drawdown_threshold: float = 0.80  # Block if price < 80% of 52-week high (20% drawdown)
+    bear_sma_threshold: float = 0.95  # Block if price < 95% of 200-day SMA
+    bear_sma_days_required: int = 10  # Must be below SMA for X consecutive days
+    death_cross_lookback_days: int = 60  # Consider death cross if within X days
 
 
 @dataclass(frozen=True)
@@ -335,5 +344,11 @@ def load_config() -> AppConfig:
             base_position_size=float(os.getenv("BASE_POSITION_SIZE", "0.10")),
             max_position_size=float(os.getenv("MAX_POSITION_SIZE", "0.15")),
             min_position_size=float(os.getenv("MIN_POSITION_SIZE", "0.05")),
+            # Improvement 5: Price-Sentiment Divergence (Bear Market Protection)
+            price_sentiment_divergence_enabled=_get_env_bool("PRICE_SENTIMENT_DIVERGENCE_ENABLED", default=True),
+            bear_drawdown_threshold=float(os.getenv("BEAR_DRAWDOWN_THRESHOLD", "0.80")),
+            bear_sma_threshold=float(os.getenv("BEAR_SMA_THRESHOLD", "0.95")),
+            bear_sma_days_required=int(os.getenv("BEAR_SMA_DAYS_REQUIRED", "10")),
+            death_cross_lookback_days=int(os.getenv("DEATH_CROSS_LOOKBACK_DAYS", "60")),
         ),
     )

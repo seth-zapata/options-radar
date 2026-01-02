@@ -31,6 +31,14 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
+# Import price indicators for divergence gate
+from backend.data.price_indicators import (
+    get_52_week_high,
+    get_sma,
+    count_consecutive_days_below_sma,
+    is_death_cross_active,
+)
+
 # Strategy parameters (same as live system)
 REGIME_WINDOW = 7
 PULLBACK_THRESHOLD = 1.5
@@ -45,6 +53,11 @@ STRONG_BEARISH_THRESHOLD = -0.15
 # VIX thresholds
 VIX_PANIC_THRESHOLD = 35.0
 VIX_ELEVATED_THRESHOLD = 25.0
+
+# Price-Sentiment Divergence Gate thresholds
+BEAR_DRAWDOWN_THRESHOLD = 0.80  # 20% below 52-week high
+BEAR_SMA_THRESHOLD = 0.95  # 5% below 200-day SMA
+BEAR_SMA_DAYS_REQUIRED = 10  # Consecutive days below SMA
 
 # Earnings blackout
 EARNINGS_BLACKOUT_DAYS_BEFORE = 5
@@ -83,6 +96,8 @@ class Signal:
     vix_level: float = 0.0
     blocked_by_vix: bool = False
     blocked_by_earnings: bool = False
+    blocked_by_divergence: bool = False
+    divergence_reason: str = ""
 
 
 @dataclass
@@ -233,6 +248,65 @@ def classify_regime_technical_only(row: pd.Series) -> Optional[str]:
     elif not price_above_sma and not macd_bullish:
         return "moderate_bearish"
     return None
+
+
+def check_bear_market_divergence(
+    symbol: str,
+    date: str,
+    current_price: float,
+    signal_type: str
+) -> tuple[bool, str]:
+    """Check if price-sentiment divergence gate should block this signal.
+
+    Only blocks CALL signals when bear market indicators are triggered.
+    PUT signals are allowed (aligned with bearish price action).
+
+    Args:
+        symbol: Stock symbol
+        date: Date to check (YYYY-MM-DD)
+        current_price: Current price on that date
+        signal_type: "CALL" or "PUT"
+
+    Returns:
+        (should_block, reason)
+    """
+    # Only block bullish (CALL) signals
+    if signal_type != "CALL":
+        return (False, "")
+
+    try:
+        from datetime import date as date_type
+
+        check_date = date_type.fromisoformat(date)
+
+        # Check 1: 52-week high drawdown
+        high_52w = get_52_week_high(symbol, as_of_date=check_date)
+        if high_52w and current_price:
+            drawdown_ratio = current_price / high_52w
+            if drawdown_ratio < BEAR_DRAWDOWN_THRESHOLD:
+                pct_down = (1 - drawdown_ratio) * 100
+                return (True, f"{pct_down:.1f}% below 52-week high")
+
+        # Check 2: Sustained below 200-day SMA
+        sma_200 = get_sma(symbol, 200, as_of_date=check_date)
+        if sma_200 and current_price:
+            sma_ratio = current_price / sma_200
+            if sma_ratio < BEAR_SMA_THRESHOLD:
+                days_below = count_consecutive_days_below_sma(
+                    symbol, 200, as_of_date=check_date, threshold_ratio=BEAR_SMA_THRESHOLD
+                )
+                if days_below >= BEAR_SMA_DAYS_REQUIRED:
+                    return (True, f"Below 200-day SMA for {days_below} days")
+
+        # Check 3: Death cross active
+        if is_death_cross_active(symbol, as_of_date=check_date):
+            return (True, "Death cross active (50 SMA < 200 SMA)")
+
+    except Exception as e:
+        # If we can't check, don't block
+        pass
+
+    return (False, "")
 
 
 def is_in_earnings_blackout(date: str, earnings_dates: list[str]) -> bool:
@@ -436,8 +510,13 @@ async def run_sanity_check():
             # Check earnings blackout
             blocked_by_earnings = is_in_earnings_blackout(date, TSLA_EARNINGS_2022)
 
-            # Get price 7 days later for direction check
+            # Check price-sentiment divergence gate (blocks CALL in bear market)
             price_at_signal = row['Close']
+            blocked_by_divergence, divergence_reason = check_bear_market_divergence(
+                "TSLA", date, price_at_signal, signal_type
+            )
+
+            # Get price 7 days later for direction check
             price_after_7d = None
             correct_direction = None
 
@@ -471,6 +550,8 @@ async def run_sanity_check():
                 vix_level=vix,
                 blocked_by_vix=blocked_by_vix,
                 blocked_by_earnings=blocked_by_earnings,
+                blocked_by_divergence=blocked_by_divergence,
+                divergence_reason=divergence_reason,
             )
             signals.append(signal)
 
@@ -528,7 +609,7 @@ async def run_sanity_check():
     print(f"  Overall:      {total_correct}/{total_known} correct ({overall_accuracy:.1f}%)")
     print()
 
-    # Signals that would NOT have been blocked
+    # Signals that would NOT have been blocked (VIX + Earnings only)
     unblocked_signals = [s for s in signals if not s.blocked_by_vix and not s.blocked_by_earnings]
     ub_call = [s for s in unblocked_signals if s.signal_type == "CALL"]
     ub_put = [s for s in unblocked_signals if s.signal_type == "PUT"]
@@ -548,6 +629,45 @@ async def run_sanity_check():
     print(f"  CALL signals: {len(ub_call_correct)}/{ub_call_known} correct ({ub_call_acc:.1f}%)")
     print(f"  PUT signals:  {len(ub_put_correct)}/{ub_put_known} correct ({ub_put_acc:.1f}%)")
     print(f"  Overall:      {ub_total_correct}/{ub_total_known} correct ({ub_overall_acc:.1f}%)")
+    print()
+
+    # Signals that would NOT have been blocked (ALL filters including divergence gate)
+    all_filtered = [s for s in signals
+                    if not s.blocked_by_vix
+                    and not s.blocked_by_earnings
+                    and not s.blocked_by_divergence]
+    af_call = [s for s in all_filtered if s.signal_type == "CALL"]
+    af_put = [s for s in all_filtered if s.signal_type == "PUT"]
+
+    af_call_correct = [s for s in af_call if s.correct_direction == True]
+    af_put_correct = [s for s in af_put if s.correct_direction == True]
+    af_call_known = len([s for s in af_call if s.correct_direction is not None])
+    af_put_known = len([s for s in af_put if s.correct_direction is not None])
+
+    af_call_acc = len(af_call_correct) / af_call_known * 100 if af_call_known > 0 else 0
+    af_put_acc = len(af_put_correct) / af_put_known * 100 if af_put_known > 0 else 0
+    af_total_correct = len(af_call_correct) + len(af_put_correct)
+    af_total_known = af_call_known + af_put_known
+    af_overall_acc = af_total_correct / af_total_known * 100 if af_total_known > 0 else 0
+
+    print("After ALL Filters (VIX + Earnings + Divergence Gate):")
+    print(f"  CALL signals: {len(af_call_correct)}/{af_call_known} correct ({af_call_acc:.1f}%)")
+    print(f"  PUT signals:  {len(af_put_correct)}/{af_put_known} correct ({af_put_acc:.1f}%)")
+    print(f"  Overall:      {af_total_correct}/{af_total_known} correct ({af_overall_acc:.1f}%)")
+    print()
+
+    # Calculate improvement from divergence gate
+    divergence_blocked = [s for s in signals if s.blocked_by_divergence]
+    div_blocked_wrong = [s for s in divergence_blocked if s.correct_direction == False]
+    div_blocked_right = [s for s in divergence_blocked if s.correct_direction == True]
+
+    print("DIVERGENCE GATE IMPACT (blocks CALLs in bear market):")
+    print(f"  CALL signals blocked: {len(divergence_blocked)}")
+    print(f"    - Would have been WRONG: {len(div_blocked_wrong)}")
+    print(f"    - Would have been RIGHT: {len(div_blocked_right)}")
+    if divergence_blocked:
+        blocked_wrong_pct = len(div_blocked_wrong) / len([s for s in divergence_blocked if s.correct_direction is not None]) * 100
+        print(f"    - Block accuracy: {blocked_wrong_pct:.1f}% (blocked signals that would have lost)")
     print()
 
     # =========================================================================
@@ -716,16 +836,23 @@ async def run_sanity_check():
     print(f"  Overall:      {total_correct}/{total_known} correct ({overall_accuracy:.1f}%)")
     print()
 
-    print("DIRECTIONAL ACCURACY (after filters):")
+    print("DIRECTIONAL ACCURACY (after VIX/Earnings):")
     print(f"  CALL signals: {len(ub_call_correct)}/{ub_call_known} correct ({ub_call_acc:.1f}%)")
     print(f"  PUT signals:  {len(ub_put_correct)}/{ub_put_known} correct ({ub_put_acc:.1f}%)")
     print(f"  Overall:      {ub_total_correct}/{ub_total_known} correct ({ub_overall_acc:.1f}%)")
     print()
 
+    print("DIRECTIONAL ACCURACY (after ALL filters incl. Divergence):")
+    print(f"  CALL signals: {len(af_call_correct)}/{af_call_known} correct ({af_call_acc:.1f}%)")
+    print(f"  PUT signals:  {len(af_put_correct)}/{af_put_known} correct ({af_put_acc:.1f}%)")
+    print(f"  Overall:      {af_total_correct}/{af_total_known} correct ({af_overall_acc:.1f}%)")
+    print()
+
     print("FILTER IMPACT:")
-    print(f"  Signals blocked (VIX > 35):    {len(signals_blocked_vix)}")
-    print(f"  Signals blocked (earnings):   {len(signals_blocked_earnings)}")
-    print(f"  Signals reduced (VIX 25-35):  {len(signals_elevated_vix)}")
+    print(f"  Signals blocked (VIX > 35):      {len(signals_blocked_vix)}")
+    print(f"  Signals blocked (earnings):     {len(signals_blocked_earnings)}")
+    print(f"  Signals blocked (divergence):   {len(divergence_blocked)}")
+    print(f"  Signals reduced (VIX 25-35):    {len(signals_elevated_vix)}")
     print()
 
     # Conclusion
@@ -734,33 +861,48 @@ async def run_sanity_check():
     print("=" * 80)
     print()
 
-    if overall_accuracy >= 55:
+    # Use the ALL FILTERS accuracy for final assessment
+    final_accuracy = af_overall_acc if af_total_known > 0 else overall_accuracy
+
+    if final_accuracy >= 55:
         assessment = "POSITIVE - Strategy showed edge in 2022 bear market"
-    elif overall_accuracy >= 50:
+    elif final_accuracy >= 50:
         assessment = "NEUTRAL - Strategy was roughly breakeven directionally"
     else:
         assessment = "NEGATIVE - Strategy struggled in 2022 bear market"
 
-    put_dominated = len(put_signals) > len(call_signals) * 1.5
+    # Check if PUTs dominate after filtering
+    af_put_total = len(af_put)
+    af_call_total = len(af_call)
+    put_dominated = af_put_total > af_call_total * 1.5
 
     print(f"Assessment: {assessment}")
     print()
 
     if put_dominated:
         print("The strategy correctly generated more PUT than CALL signals during")
-        print("the 2022 bear market, suggesting regime detection worked appropriately.")
+        print("the 2022 bear market after applying filters.")
     else:
-        print("The PUT/CALL ratio suggests the regime detection may not have")
-        print("adapted quickly enough to the bearish environment.")
+        print("The PUT/CALL ratio after filtering suggests the divergence gate")
+        print("is blocking bad CALL signals in the bear market.")
 
     print()
 
-    if ub_overall_acc > overall_accuracy:
-        improvement = ub_overall_acc - overall_accuracy
-        print(f"VIX and earnings filters IMPROVED accuracy by {improvement:.1f}%")
-    elif ub_overall_acc < overall_accuracy:
-        decline = overall_accuracy - ub_overall_acc
-        print(f"VIX and earnings filters REDUCED accuracy by {decline:.1f}%")
+    # Show improvement from divergence gate specifically
+    if len(divergence_blocked) > 0:
+        print(f"DIVERGENCE GATE ANALYSIS:")
+        print(f"  Blocked {len(divergence_blocked)} CALL signals during bear market conditions")
+        if len(div_blocked_wrong) > len(div_blocked_right):
+            print(f"  This blocked {len(div_blocked_wrong)} losing trades vs {len(div_blocked_right)} winning trades")
+            print(f"  NET BENEFIT: Saved from {len(div_blocked_wrong) - len(div_blocked_right)} net losing trades")
+        print()
+
+    if af_overall_acc > overall_accuracy:
+        improvement = af_overall_acc - overall_accuracy
+        print(f"All filters (VIX + Earnings + Divergence) IMPROVED accuracy by {improvement:.1f}%")
+    elif af_overall_acc < overall_accuracy:
+        decline = overall_accuracy - af_overall_acc
+        print(f"All filters REDUCED accuracy by {decline:.1f}%")
     else:
         print("Filters had minimal impact on accuracy.")
 

@@ -43,6 +43,12 @@ load_dotenv(Path(__file__).parent.parent.parent / ".env")
 # Import improvement modules
 from backend.data.earnings_calendar import EarningsCalendar, HISTORICAL_EARNINGS
 from backend.data.vix_client import VIXClient, VIXRegime
+from backend.data.price_indicators import (
+    get_52_week_high,
+    get_sma,
+    count_consecutive_days_below_sma,
+    is_death_cross_active,
+)
 
 CACHE_DB = Path(__file__).parent.parent.parent / "cache" / "options_data.db"
 
@@ -74,7 +80,7 @@ MAX_CONCURRENT_POSITIONS = 3
 
 @dataclass
 class ImprovementConfig:
-    """Configuration for the 4 risk management improvements."""
+    """Configuration for the 5 risk management improvements."""
     # Improvement 1: Earnings Blackout
     earnings_blackout_enabled: bool = True
     earnings_blackout_days_before: int = 5
@@ -91,6 +97,13 @@ class ImprovementConfig:
 
     # Improvement 4: Dynamic Position Sizing
     dynamic_sizing_enabled: bool = True
+
+    # Improvement 5: Price-Sentiment Divergence Gate
+    # Blocks CALL signals when bear market indicators are triggered
+    divergence_gate_enabled: bool = True
+    bear_drawdown_threshold: float = 0.80  # 20% below 52-week high
+    bear_sma_threshold: float = 0.95  # 5% below 200-day SMA
+    bear_sma_days_required: int = 10  # Consecutive days below SMA
     # Regime strength multipliers
     regime_multipliers: dict = field(default_factory=lambda: {
         "strong_bullish": 1.15,
@@ -297,6 +310,68 @@ def is_in_earnings_blackout(
                 return True
         except ValueError:
             continue
+
+    return False
+
+
+def check_bear_market_divergence(
+    symbol: str,
+    trade_date: str,
+    current_price: float,
+    option_type: str,
+    improvements: ImprovementConfig
+) -> bool:
+    """Check if price-sentiment divergence gate should block this signal.
+
+    Only blocks CALL signals when bear market indicators are triggered.
+    PUT signals are allowed (aligned with bearish price action).
+
+    Args:
+        symbol: Stock symbol
+        trade_date: Date to check (YYYY-MM-DD)
+        current_price: Current stock price on that date
+        option_type: "call" or "put"
+        improvements: Configuration for thresholds
+
+    Returns:
+        True if signal should be BLOCKED
+    """
+    # Only block bullish (call) signals
+    if option_type != "call":
+        return False
+
+    if not improvements.divergence_gate_enabled:
+        return False
+
+    try:
+        check_date = date.fromisoformat(trade_date)
+
+        # Check 1: 52-week high drawdown
+        high_52w = get_52_week_high(symbol, as_of_date=check_date)
+        if high_52w and current_price:
+            drawdown_ratio = current_price / high_52w
+            if drawdown_ratio < improvements.bear_drawdown_threshold:
+                return True  # Block - significant drawdown
+
+        # Check 2: Sustained below 200-day SMA
+        sma_200 = get_sma(symbol, 200, as_of_date=check_date)
+        if sma_200 and current_price:
+            sma_ratio = current_price / sma_200
+            if sma_ratio < improvements.bear_sma_threshold:
+                days_below = count_consecutive_days_below_sma(
+                    symbol, 200, as_of_date=check_date,
+                    threshold_ratio=improvements.bear_sma_threshold
+                )
+                if days_below >= improvements.bear_sma_days_required:
+                    return True  # Block - sustained below SMA
+
+        # Check 3: Death cross active
+        if is_death_cross_active(symbol, as_of_date=check_date):
+            return True  # Block - death cross
+
+    except Exception:
+        # If we can't check, don't block
+        pass
 
     return False
 
@@ -508,6 +583,13 @@ async def run_portfolio_simulation(
                 option_type = "put"
 
             if entry_trigger:
+                # IMPROVEMENT 5: Price-Sentiment Divergence Gate
+                # Block CALL signals when bear market indicators are triggered
+                if check_bear_market_divergence(
+                    symbol, date, stock_price, option_type, improvements
+                ):
+                    continue  # Block entry during bear market divergence
+
                 contract = get_option_contract(
                     CACHE_DB, symbol, date, stock_price, option_type, TARGET_DTE
                 )
@@ -743,6 +825,7 @@ async def main():
         earnings_blackout_enabled=False,
         vix_filter_enabled=False,
         dynamic_sizing_enabled=False,
+        divergence_gate_enabled=False,
     )
 
     # Configuration WITH all improvements
@@ -802,6 +885,8 @@ async def main():
               f"Reduce >{with_improvements.vix_elevated_threshold}")
     if with_improvements.dynamic_sizing_enabled:
         print(f"  Dynamic sizing: Regime + Tech confirmation multipliers")
+    if with_improvements.divergence_gate_enabled:
+        print(f"  Divergence gate: Block CALLs when price < {(1-with_improvements.bear_drawdown_threshold)*100:.0f}% of 52wk high")
     print()
 
     # =========================================================================
