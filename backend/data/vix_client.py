@@ -166,16 +166,20 @@ class VIXClient:
         Args:
             start_date: Start date for historical data (YYYY-MM-DD)
         """
-        # Try to load from cache first
+        # Try to load from cache first (simplified format)
         if VIX_CACHE_FILE.exists():
             try:
                 self._historical_data = pd.read_csv(
                     VIX_CACHE_FILE,
-                    index_col="Date",
+                    index_col=0,  # First column is the date index
                     parse_dates=True,
                 )
-                logger.info(f"Loaded {len(self._historical_data)} days of VIX data from cache")
-                return
+                # Check if this is our simplified format (has 'Close' column directly)
+                if 'Close' in self._historical_data.columns:
+                    logger.info(f"Loaded {len(self._historical_data)} days of VIX data from cache")
+                    return
+                # Otherwise it might be the old multi-level format, re-fetch
+                logger.debug("Cache format outdated, re-fetching")
             except Exception as e:
                 logger.warning(f"Failed to load VIX cache: {e}")
 
@@ -190,7 +194,12 @@ class VIXClient:
                 logger.warning("No VIX historical data fetched")
                 return
 
-            # Save to cache
+            # Flatten multi-level columns if present
+            if isinstance(vix.columns, pd.MultiIndex):
+                # Extract just the price type (Close, Open, etc.) from multi-level
+                vix.columns = [col[0] for col in vix.columns]
+
+            # Save to cache in simplified format
             CACHE_DIR.mkdir(exist_ok=True)
             vix.to_csv(VIX_CACHE_FILE)
             self._historical_data = vix
