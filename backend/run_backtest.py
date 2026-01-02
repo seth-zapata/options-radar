@@ -962,6 +962,12 @@ def print_results(stats: BacktestStats) -> None:
                 print(f"    Max Pain Edge: {mp_aligned_acc - mp_against_acc:+.1f}%")
 
     # IV Rank Validation (validates ORATS $199/mo subscription value)
+    # Initialize IV accuracy variables (used in summary even if no IV data)
+    iv_low_acc = 0.0
+    iv_mid_acc = 0.0
+    iv_high_weak_acc = 0.0
+    iv_high_strong_acc = 0.0
+
     if stats.iv_rank_data_signals > 0:
         print("\n" + "-" * 70)
         print(f"IV RANK VALIDATION (EODHD Historical IV) - {stats.iv_rank_data_signals} signals with data")
