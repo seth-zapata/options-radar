@@ -500,7 +500,7 @@ async def gate_evaluation_loop() -> None:
 
             if not symbols_to_evaluate and aggregator:
                 # Real mode - just evaluate the subscribed symbol
-                symbols_to_evaluate = ["NVDA"]
+                symbols_to_evaluate = ["TSLA"]
 
             # Only evaluate regime-enabled symbols (TSLA only for now)
             # This reduces log noise and CPU waste from evaluating non-validated symbols
@@ -656,7 +656,7 @@ async def gate_evaluation_loop() -> None:
                             if auto_executor and selected_option:
                                 try:
                                     result = await auto_executor.execute_signal(
-                                        regime_signal, selected_option
+                                        regime_signal, selected_option, signal_id=signal_id
                                     )
                                     if result.success:
                                         logger.info(
@@ -1501,7 +1501,7 @@ async def lifespan(app: FastAPI):
     subscription_manager = SubscriptionManager(
         config=config.alpaca,
         client=alpaca_client,
-        symbol="NVDA",  # MVP: Single symbol
+        symbol="TSLA",  # MVP: Single symbol - TSLA is validated for regime trading
         strikes_around_atm=10,
     )
     await subscription_manager.start()

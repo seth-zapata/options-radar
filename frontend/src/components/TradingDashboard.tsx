@@ -710,25 +710,35 @@ export function TradingDashboard() {
           <div className="px-4 py-3 bg-emerald-600 text-white rounded-t-lg">
             <h3 className="font-bold">Entry Signals</h3>
             <p className="text-sm text-emerald-200">
-              {regimeSignals.length > 0 ? `${regimeSignals.length} signal${regimeSignals.length !== 1 ? 's' : ''}` : 'Waiting for pullback/bounce...'}
+              {(() => {
+                const activeCount = regimeSignals.filter(s => !confirmedSignalIds.has(s.id)).length;
+                return activeCount > 0 ? `${activeCount} signal${activeCount !== 1 ? 's' : ''}` : 'Waiting for pullback/bounce...';
+              })()}
             </p>
           </div>
           <div className="p-4 space-y-2 max-h-96 overflow-y-auto">
-            {regimeSignals.length === 0 ? (
-              <div className="text-center py-8 text-slate-400">
-                <div className="text-lg mb-1">No signals yet</div>
-                <div className="text-sm">Signals appear when regime + pullback/bounce conditions are met</div>
-              </div>
-            ) : (
-              regimeSignals.slice(0, 10).map((signal, idx) => (
+            {(() => {
+              // Filter out signals that have been taken as positions
+              const activeSignals = regimeSignals.filter(signal => !confirmedSignalIds.has(signal.id));
+
+              if (activeSignals.length === 0) {
+                return (
+                  <div className="text-center py-8 text-slate-400">
+                    <div className="text-lg mb-1">No signals yet</div>
+                    <div className="text-sm">Signals appear when regime + pullback/bounce conditions are met</div>
+                  </div>
+                );
+              }
+
+              return activeSignals.slice(0, 10).map((signal, idx) => (
                 <CompactSignalRow
                   key={signal.id || `${signal.generated_at}-${idx}`}
                   signal={signal}
-                  isConfirmed={confirmedSignalIds.has(signal.id)}
+                  isConfirmed={false}
                   onTakeTrade={() => setSelectedSignal(signal)}
                 />
-              ))
-            )}
+              ));
+            })()}
           </div>
         </div>
 

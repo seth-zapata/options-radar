@@ -166,12 +166,14 @@ class AutoExecutor:
         self,
         signal: TradeSignal,
         option: OptionSelection,
+        signal_id: str | None = None,
     ) -> ExecutionResult:
         """Execute a trade signal.
 
         Args:
             signal: The trade signal to execute
             option: The selected option contract
+            signal_id: Optional signal ID to use as recommendation_id (for frontend matching)
 
         Returns:
             ExecutionResult with order details
@@ -281,9 +283,11 @@ class AutoExecutor:
             fill_price = mid_price
 
         # Track in PositionTracker
+        # Use signal_id if provided (for frontend matching), otherwise fallback to order_id
         action = "BUY_CALL" if signal.signal_type == SignalType.BUY_CALL else "BUY_PUT"
+        recommendation_id = signal_id if signal_id else f"auto_{order_result.order_id}"
         position = self.position_tracker.open_position(
-            recommendation_id=f"auto_{order_result.order_id}",
+            recommendation_id=recommendation_id,
             underlying=signal.symbol,
             expiry=option.expiry,
             strike=option.strike,

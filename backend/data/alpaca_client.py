@@ -434,7 +434,19 @@ class AlpacaOptionsClient:
         """
         try:
             symbol = msg.get("S", "")
+
+            # Filter out quotes for symbols we didn't subscribe to
+            if symbol not in self._subscribed_symbols:
+                return
+
             canonical_id = parse_alpaca(symbol)
+
+            # Convert timestamp to ISO string (Alpaca returns pandas.Timestamp during live trading)
+            ts = msg.get("t", receive_ts)
+            if hasattr(ts, 'isoformat'):
+                ts = ts.isoformat()
+            elif not isinstance(ts, str):
+                ts = str(ts)
 
             quote = QuoteData(
                 canonical_id=canonical_id,
@@ -443,7 +455,7 @@ class AlpacaOptionsClient:
                 bid_size=int(msg.get("bs", 0)),
                 ask_size=int(msg.get("as", 0)),
                 last=None,  # Quotes don't include last price
-                timestamp=msg.get("t", receive_ts),
+                timestamp=ts,
                 receive_timestamp=receive_ts,
                 source="alpaca",
             )
@@ -470,13 +482,25 @@ class AlpacaOptionsClient:
         """
         try:
             symbol = msg.get("S", "")
+
+            # Filter out trades for symbols we didn't subscribe to
+            if symbol not in self._subscribed_symbols:
+                return
+
             canonical_id = parse_alpaca(symbol)
+
+            # Convert timestamp to ISO string (Alpaca returns pandas.Timestamp during live trading)
+            ts = msg.get("t", receive_ts)
+            if hasattr(ts, 'isoformat'):
+                ts = ts.isoformat()
+            elif not isinstance(ts, str):
+                ts = str(ts)
 
             trade = TradeData(
                 canonical_id=canonical_id,
                 price=float(msg.get("p", 0)),
                 size=int(msg.get("s", 0)),
-                timestamp=msg.get("t", receive_ts),
+                timestamp=ts,
                 exchange=msg.get("x", ""),
                 conditions=msg.get("c", []),
             )
