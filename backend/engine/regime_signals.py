@@ -18,8 +18,19 @@ from typing import Optional, Literal
 
 from backend.engine.regime_detector import RegimeDetector, RegimeType, ActiveRegime
 from backend.engine.momentum_signals import MomentumSignalGenerator, MomentumSignalConfig
+from backend.data.price_indicators import (
+    get_sma,
+    get_52_week_high,
+    is_death_cross_active,
+    count_consecutive_days_below_sma,
+)
 
 logger = logging.getLogger(__name__)
+
+# Bear market detection thresholds (same as backtesting)
+BEAR_DRAWDOWN_THRESHOLD = 0.80  # 20% below 52-week high
+BEAR_SMA_THRESHOLD = 0.95  # 5% below 200-day SMA
+BEAR_SMA_DAYS_REQUIRED = 10  # Consecutive days below SMA
 
 
 class SignalType(Enum):
@@ -256,11 +267,66 @@ class RegimeSignalGenerator:
         if self.config.dual_regime_enabled:
             self._momentum_generator = MomentumSignalGenerator(MomentumSignalConfig())
 
+    def _detect_bear_market(
+        self,
+        symbol: str,
+        current_price: float,
+    ) -> tuple[bool, str]:
+        """Detect if bear market conditions exist based on price indicators.
+
+        Same logic as backtesting - blocks CALL signals and enables momentum PUTs.
+
+        Returns:
+            (is_bear_market, reason)
+        """
+        try:
+            # Get 50-day SMA for trend confirmation
+            sma_50 = get_sma(symbol, 50)
+            in_downtrend = sma_50 and current_price and (current_price < sma_50)
+            in_recovery = sma_50 and current_price and (current_price >= sma_50 * 1.05)
+
+            # Don't trigger in recovery mode
+            if in_recovery:
+                return (False, "")
+
+            # Check 1: Death cross active WITH downtrend
+            if is_death_cross_active(symbol) and in_downtrend:
+                return (True, "Death cross active AND below 50-day SMA")
+
+            # Check 2: 52-week high drawdown WITH downtrend
+            high_52w = get_52_week_high(symbol)
+            if high_52w and current_price:
+                drawdown_ratio = current_price / high_52w
+                if drawdown_ratio < BEAR_DRAWDOWN_THRESHOLD and in_downtrend:
+                    pct_down = (1 - drawdown_ratio) * 100
+                    return (True, f"{pct_down:.1f}% below 52-week high AND downtrend")
+
+            # Check 3: Sustained below 200-day SMA WITH downtrend
+            sma_200 = get_sma(symbol, 200)
+            if sma_200 and current_price:
+                sma_ratio = current_price / sma_200
+                if sma_ratio < BEAR_SMA_THRESHOLD:
+                    days_below = count_consecutive_days_below_sma(
+                        symbol, 200, threshold_ratio=BEAR_SMA_THRESHOLD
+                    )
+                    if days_below >= BEAR_SMA_DAYS_REQUIRED and in_downtrend:
+                        return (True, f"Below 200-day SMA for {days_below} days AND downtrend")
+
+        except Exception as e:
+            logger.debug(f"Error checking bear market for {symbol}: {e}")
+
+        return (False, "")
+
     def check_entry_signal(
         self,
         price_data: PriceData,
     ) -> TradeSignal:
         """Check if price action triggers an entry signal.
+
+        Includes:
+        1. Divergence gate: Blocks CALL signals when bear market detected
+        2. Independent momentum: Generates PUT signals in bear markets
+        3. Sentiment signals: Normal pullback/bounce entries
 
         Args:
             price_data: Current OHLC price data
@@ -271,14 +337,38 @@ class RegimeSignalGenerator:
         symbol = price_data.symbol
         now = price_data.timestamp
 
-        # Get active regime
+        # FIRST: Check for bear market conditions (price-based, independent of sentiment)
+        is_bear_market, bear_reason = self._detect_bear_market(symbol, price_data.current)
+
+        # INDEPENDENT MOMENTUM CHECK: Try momentum signal on ALL bear market days
+        if is_bear_market and self.config.dual_regime_enabled and self._momentum_generator:
+            # Check if PUT direction is available
+            open_dirs = self._open_positions_by_direction.get(symbol, {})
+            if not open_dirs.get("put", False):
+                # Check max positions
+                if self._open_positions < self.config.max_concurrent_positions:
+                    momentum_signal = self.check_momentum_signal(symbol, bear_reason, price_data.current)
+                    if momentum_signal.signal_type != SignalType.NO_SIGNAL:
+                        return momentum_signal
+
+        # Get active sentiment regime
         regime = self.regime_detector.get_active_regime(symbol)
 
         if not regime or not regime.is_active:
             return self._no_signal(symbol, now, "No active regime")
 
-        # Determine target direction based on regime
+        # Determine target direction based on sentiment regime
         target_direction = "call" if regime.regime_type.is_bullish else "put"
+
+        # DIVERGENCE GATE: Block CALL signals in bear market
+        if regime.regime_type.is_bullish and is_bear_market:
+            logger.info(
+                f"[DIVERGENCE GATE] Blocking CALL signal for {symbol}: {bear_reason}"
+            )
+            return self._no_signal(
+                symbol, now,
+                f"Divergence gate: {bear_reason}"
+            )
 
         # Check "while open" cooldown - block if same-direction position is open
         open_dirs = self._open_positions_by_direction.get(symbol, {})
