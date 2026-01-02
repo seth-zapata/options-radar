@@ -6,9 +6,9 @@ This module generates PUT signals based on price momentum - "sell the rally" ins
 
 Signal Logic:
 1. Bear market confirmed (via Price-Sentiment Divergence Gate detection)
-2. Recent bounce detected (3%+ rise from recent low in last 5 days)
-3. Resistance rejection (price within 2% of 50-day SMA but still below)
-4. Technical confirmation (at least 2 of 3: RSI < 50, MACD < Signal, price < 20 SMA)
+2. Recent bounce detected (2%+ rise from recent low in last 7 days)
+3. Bounce exhaustion (gave back 40%+ of gains OR 2+ consecutive red days after peak)
+4. Technical confirmation (at least 1 of 3: RSI < 50, MACD < Signal, price < 20 SMA)
 5. Not oversold (RSI > 25 - don't short into capitulation)
 """
 
@@ -24,6 +24,10 @@ from backend.data.price_indicators import (
     get_recent_low,
     get_recent_high,
     get_price_n_days_ago,
+    get_price_series,
+    find_recent_low_index,
+    find_peak_after_index,
+    count_consecutive_red_days,
     _get_historical_price_data,
     _get_price_data,
 )
@@ -53,11 +57,12 @@ class MomentumSignalConfig:
     """Configuration for momentum signal generation."""
 
     # Bounce detection - identifies relief rally to sell into
-    bounce_threshold: float = 0.02  # 2% bounce from low required (was 3%)
-    bounce_lookback_days: int = 5  # Days to look back for recent low
+    bounce_threshold: float = 0.02  # 2% bounce from low required
+    bounce_lookback_days: int = 7  # Days to look back for recent low (extended from 5)
 
-    # Resistance detection - price approaching 50-day SMA from below
-    resistance_proximity: float = 0.05  # Within 5% of 50-day SMA (was 2%)
+    # Bounce exhaustion - detects when bounce is failing (replaces SMA proximity)
+    exhaustion_giveback_pct: float = 0.40  # Bounce gave back 40%+ of gains
+    exhaustion_red_days: int = 2  # Or 2+ consecutive red days after peak
 
     # RSI thresholds
     oversold_rsi: float = 25.0  # Don't short below this (capitulation risk)
@@ -144,46 +149,75 @@ class MomentumSignalGenerator:
             f"No bounce yet ({bounce_pct * 100:.1f}% < {self.config.bounce_threshold * 100:.1f}% threshold)"
         )
 
-    def detect_resistance_rejection(
+    def detect_bounce_exhaustion(
         self,
         symbol: str,
-        current_price: float,
         as_of_date: Optional[date] = None
-    ) -> tuple[bool, str]:
-        """Detect if price is near 50-day SMA resistance.
+    ) -> tuple[bool, float, str]:
+        """Detect if a recent bounce is failing/exhausted.
 
-        In bear markets, the 50-day SMA often acts as resistance.
-        This detects when price is testing and likely to reject from it.
+        This replaces the SMA proximity check with a more reliable pattern:
+        - Bounce gave back 40%+ of gains, OR
+        - 2+ consecutive red days after bounce peak
 
         Returns:
-            Tuple of (rejection_detected, reason)
+            Tuple of (exhaustion_detected, bounce_pct, reason)
         """
-        sma_50 = get_sma(symbol, 50, as_of_date)
+        # Get recent price action (need enough data to find bounce pattern)
+        prices = get_price_series(symbol, as_of_date, days=12)
+        if len(prices) < 5:
+            return False, 0.0, "Insufficient price data"
 
-        if sma_50 is None or sma_50 == 0:
-            return False, "No 50-day SMA data"
+        # Find recent low within lookback period
+        low_idx = find_recent_low_index(prices, lookback=self.config.bounce_lookback_days)
+        if low_idx is None:
+            return False, 0.0, "No recent low found"
 
-        # Price must be below SMA (bearish condition)
-        if current_price >= sma_50:
-            return False, f"Price above 50-day SMA (${current_price:.2f} >= ${sma_50:.2f})"
+        recent_low = prices[low_idx]
 
-        # Check if within resistance proximity (close to but below SMA)
-        distance_from_sma = (sma_50 - current_price) / sma_50
+        # Find peak after the low
+        peak_idx, bounce_peak = find_peak_after_index(prices, low_idx)
+        if peak_idx is None or bounce_peak is None:
+            return False, 0.0, "No price action after low"
 
-        if distance_from_sma <= self.config.resistance_proximity:
+        current_price = prices[-1]
+
+        # Calculate bounce metrics
+        bounce_amount = bounce_peak - recent_low
+        if bounce_amount <= 0:
+            return False, 0.0, "No bounce detected"
+
+        bounce_pct = bounce_amount / recent_low
+        if bounce_pct < self.config.bounce_threshold:
+            return False, bounce_pct, f"Bounce too small: {bounce_pct * 100:.1f}%"
+
+        # Check exhaustion criteria
+        giveback = bounce_peak - current_price
+        giveback_pct = giveback / bounce_amount if bounce_amount > 0 else 0
+
+        # Criterion 1: Gave back 40%+ of bounce
+        if giveback_pct >= self.config.exhaustion_giveback_pct:
             return (
                 True,
-                f"Price within {distance_from_sma * 100:.1f}% of 50-day SMA resistance (${sma_50:.2f})"
+                bounce_pct,
+                f"Bounce exhaustion: Gave back {giveback_pct * 100:.0f}% of +{bounce_pct * 100:.1f}% bounce"
             )
 
-        # Check if price touched and reversed (yesterday at/above SMA, today below)
-        yesterday_price = get_price_n_days_ago(symbol, as_of_date, n=1)
-        if yesterday_price and yesterday_price >= sma_50 * 0.99 and current_price < sma_50:
-            return True, "Price rejected at 50-day SMA resistance (touched yesterday, below today)"
+        # Criterion 2: Consecutive red days after peak
+        if peak_idx < len(prices) - 1:
+            prices_after_peak = prices[peak_idx:]
+            red_days = count_consecutive_red_days(prices_after_peak)
+            if red_days >= self.config.exhaustion_red_days:
+                return (
+                    True,
+                    bounce_pct,
+                    f"Bounce failed: {red_days} consecutive red days after +{bounce_pct * 100:.1f}% bounce"
+                )
 
         return (
             False,
-            f"Not at resistance ({distance_from_sma * 100:.1f}% below 50-day SMA)"
+            bounce_pct,
+            f"Bounce not exhausted yet (gave back {giveback_pct * 100:.0f}%, {count_consecutive_red_days(prices[peak_idx:]) if peak_idx < len(prices) else 0} red days)"
         )
 
     def get_technical_confirmations(
@@ -265,10 +299,9 @@ class MomentumSignalGenerator:
 
         All conditions must be met:
         1. Bear market confirmed (passed in via bear_market_reason)
-        2. Recent bounce detected (relief rally to sell)
-        3. At resistance (50-day SMA)
-        4. At least 2/3 technical confirmations
-        5. Not oversold (don't short capitulation)
+        2. Bounce exhaustion detected (relief rally that's now failing)
+        3. At least 1/3 technical confirmations
+        4. Not oversold (don't short capitulation)
 
         Args:
             symbol: Stock symbol
@@ -294,23 +327,14 @@ class MomentumSignalGenerator:
             logger.debug(f"{symbol} is oversold - skipping momentum signal")
             return None
 
-        # Check for bounce (relief rally)
-        bounce_detected, bounce_pct, bounce_reason = self.detect_bounce(
-            symbol, current_price, as_of_date
+        # Check for bounce exhaustion (replaces separate bounce + resistance checks)
+        exhaustion_detected, bounce_pct, exhaustion_reason = self.detect_bounce_exhaustion(
+            symbol, as_of_date
         )
-        if not bounce_detected:
-            logger.debug(f"{symbol}: {bounce_reason}")
+        if not exhaustion_detected:
+            logger.debug(f"{symbol}: {exhaustion_reason}")
             return None
-        reasons.append(bounce_reason)
-
-        # Check for resistance rejection
-        rejection_detected, rejection_reason = self.detect_resistance_rejection(
-            symbol, current_price, as_of_date
-        )
-        if not rejection_detected:
-            logger.debug(f"{symbol}: {rejection_reason}")
-            return None
-        reasons.append(rejection_reason)
+        reasons.append(exhaustion_reason)
 
         # Get technical confirmations
         tech_count, tech_reasons = self.get_technical_confirmations(
@@ -337,7 +361,7 @@ class MomentumSignalGenerator:
             confidence = 60
         else:
             strength = "weak"
-            confidence = 45
+            confidence = 50  # Slightly higher for bounce exhaustion signals
 
         logger.info(
             f"MOMENTUM PUT SIGNAL: {symbol} - {strength.upper()} (confidence: {confidence}%)\n"

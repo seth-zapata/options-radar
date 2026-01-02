@@ -477,6 +477,132 @@ def get_price_n_days_ago(
     return float(df['Close'].iloc[-(n + 1)])
 
 
+def get_price_series(
+    symbol: str,
+    as_of_date: Optional[date] = None,
+    days: int = 10
+) -> list[float]:
+    """Get list of closing prices for last N trading days.
+
+    Args:
+        symbol: Stock symbol
+        as_of_date: Calculate as of this date (None = current)
+        days: Number of trading days to return
+
+    Returns:
+        List of closing prices, oldest first
+    """
+    # Convert trading days to calendar days (roughly 1.5x)
+    calendar_days = int(days * 1.5) + 10
+
+    if as_of_date:
+        df = _get_historical_price_data(symbol, as_of_date, days_back=calendar_days)
+    else:
+        df = _get_price_data(symbol, days_back=calendar_days)
+
+    if df.empty:
+        return []
+
+    # Get last N trading days
+    return df['Close'].tail(days).tolist()
+
+
+def get_price_series_with_highs_lows(
+    symbol: str,
+    as_of_date: Optional[date] = None,
+    days: int = 10
+) -> tuple[list[float], list[float], list[float]]:
+    """Get list of OHLC prices for last N trading days.
+
+    Args:
+        symbol: Stock symbol
+        as_of_date: Calculate as of this date (None = current)
+        days: Number of trading days to return
+
+    Returns:
+        Tuple of (closes, highs, lows) lists, oldest first
+    """
+    # Convert trading days to calendar days (roughly 1.5x)
+    calendar_days = int(days * 1.5) + 10
+
+    if as_of_date:
+        df = _get_historical_price_data(symbol, as_of_date, days_back=calendar_days)
+    else:
+        df = _get_price_data(symbol, days_back=calendar_days)
+
+    if df.empty:
+        return [], [], []
+
+    # Get last N trading days
+    recent = df.tail(days)
+    return recent['Close'].tolist(), recent['High'].tolist(), recent['Low'].tolist()
+
+
+def find_recent_low_index(prices: list[float], lookback: int = 7) -> Optional[int]:
+    """Find index of lowest price in lookback period.
+
+    Args:
+        prices: List of prices (oldest first)
+        lookback: Number of periods to look back from end
+
+    Returns:
+        Index of lowest price in the lookback period, or None if insufficient data
+    """
+    if len(prices) < 2:
+        return None
+
+    if len(prices) < lookback:
+        lookback = len(prices)
+
+    recent_prices = prices[-lookback:]
+    min_val = min(recent_prices)
+    # Return index in original list
+    return len(prices) - lookback + recent_prices.index(min_val)
+
+
+def find_peak_after_index(prices: list[float], start_idx: int) -> tuple[Optional[int], Optional[float]]:
+    """Find the peak (highest price) after a given index.
+
+    Args:
+        prices: List of prices (oldest first)
+        start_idx: Index to start searching from
+
+    Returns:
+        Tuple of (peak_index, peak_value) or (None, None) if not found
+    """
+    if start_idx >= len(prices) - 1:
+        return None, None
+
+    prices_after = prices[start_idx:]
+    if len(prices_after) < 2:
+        return None, None
+
+    peak_val = max(prices_after)
+    peak_idx = start_idx + prices_after.index(peak_val)
+    return peak_idx, peak_val
+
+
+def count_consecutive_red_days(prices: list[float]) -> int:
+    """Count consecutive days where price declined from the start.
+
+    Args:
+        prices: List of prices to check (oldest first)
+
+    Returns:
+        Number of consecutive declining days from start
+    """
+    if len(prices) < 2:
+        return 0
+
+    count = 0
+    for i in range(1, len(prices)):
+        if prices[i] < prices[i - 1]:
+            count += 1
+        else:
+            break
+    return count
+
+
 def clear_cache():
     """Clear the price data cache."""
     global _price_cache, _cache_timestamps
