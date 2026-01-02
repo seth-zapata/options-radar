@@ -187,6 +187,32 @@ class RegimeStrategyConfig:
 
 
 @dataclass(frozen=True)
+class DualRegimeConfig:
+    """Dual-regime signal generation configuration.
+
+    When bear market is detected, switches from sentiment-based signals
+    to momentum-based PUT signals ("sell the rally" strategy).
+    """
+
+    # Master enable for dual-regime mode
+    enabled: bool = True
+
+    # Bounce detection (identifies relief rally to sell into)
+    bounce_threshold: float = 0.03  # 3% bounce from recent low required
+    bounce_lookback_days: int = 5  # Days to look back for recent low
+
+    # Resistance detection (50-day SMA as resistance in bear markets)
+    resistance_proximity: float = 0.02  # Within 2% of 50-day SMA
+
+    # RSI thresholds for momentum signals
+    oversold_rsi: float = 25.0  # Don't short below this (capitulation)
+    neutral_rsi: float = 50.0  # Bearish below this
+
+    # VIX limits for bear market trading
+    vix_max_for_puts: float = 35.0  # Too volatile above this
+
+
+@dataclass(frozen=True)
 class RiskManagementConfig:
     """Risk management configuration for the 5 improvements.
 
@@ -270,6 +296,9 @@ class AppConfig:
     # Risk management configuration (4 improvements)
     risk_management: RiskManagementConfig = RiskManagementConfig()
 
+    # Dual-regime configuration (bear market momentum signals)
+    dual_regime: DualRegimeConfig = DualRegimeConfig()
+
 
 def _get_env_or_raise(key: str) -> str:
     """Get environment variable or raise if not set."""
@@ -350,5 +379,14 @@ def load_config() -> AppConfig:
             bear_sma_threshold=float(os.getenv("BEAR_SMA_THRESHOLD", "0.95")),
             bear_sma_days_required=int(os.getenv("BEAR_SMA_DAYS_REQUIRED", "10")),
             death_cross_lookback_days=int(os.getenv("DEATH_CROSS_LOOKBACK_DAYS", "60")),
+        ),
+        dual_regime=DualRegimeConfig(
+            enabled=_get_env_bool("DUAL_REGIME_ENABLED", default=True),
+            bounce_threshold=float(os.getenv("MOMENTUM_BOUNCE_THRESHOLD", "0.03")),
+            bounce_lookback_days=int(os.getenv("MOMENTUM_BOUNCE_LOOKBACK", "5")),
+            resistance_proximity=float(os.getenv("MOMENTUM_RESISTANCE_PROXIMITY", "0.02")),
+            oversold_rsi=float(os.getenv("MOMENTUM_OVERSOLD_RSI", "25")),
+            neutral_rsi=float(os.getenv("MOMENTUM_NEUTRAL_RSI", "50")),
+            vix_max_for_puts=float(os.getenv("MOMENTUM_VIX_MAX", "35")),
         ),
     )

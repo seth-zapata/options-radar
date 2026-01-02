@@ -49,6 +49,10 @@ from backend.data.price_indicators import (
     count_consecutive_days_below_sma,
     is_death_cross_active,
 )
+from backend.engine.momentum_signals import (
+    MomentumSignalGenerator,
+    MomentumSignalConfig,
+)
 
 CACHE_DB = Path(__file__).parent.parent.parent / "cache" / "options_data.db"
 
@@ -80,7 +84,7 @@ MAX_CONCURRENT_POSITIONS = 3
 
 @dataclass
 class ImprovementConfig:
-    """Configuration for the 5 risk management improvements."""
+    """Configuration for the 5 risk management improvements + dual-regime."""
     # Improvement 1: Earnings Blackout
     earnings_blackout_enabled: bool = True
     earnings_blackout_days_before: int = 5
@@ -104,6 +108,14 @@ class ImprovementConfig:
     bear_drawdown_threshold: float = 0.80  # 20% below 52-week high
     bear_sma_threshold: float = 0.95  # 5% below 200-day SMA
     bear_sma_days_required: int = 10  # Consecutive days below SMA
+
+    # DUAL-REGIME: Generate momentum PUT signals during bear markets
+    # Instead of just blocking CALLs, actively generate PUT signals
+    dual_regime_enabled: bool = True
+    momentum_bounce_threshold: float = 0.03  # 3% bounce from low required
+    momentum_bounce_lookback: int = 5  # Days to look for recent low
+    momentum_resistance_proximity: float = 0.02  # Within 2% of 50-day SMA
+    momentum_oversold_rsi: float = 25.0  # Don't short below this RSI
     # Regime strength multipliers
     regime_multipliers: dict = field(default_factory=lambda: {
         "strong_bullish": 1.15,
@@ -320,7 +332,7 @@ def check_bear_market_divergence(
     current_price: float,
     option_type: str,
     improvements: ImprovementConfig
-) -> bool:
+) -> tuple[bool, str]:
     """Check if price-sentiment divergence gate should block this signal.
 
     Only blocks CALL signals when bear market indicators are triggered.
@@ -337,14 +349,16 @@ def check_bear_market_divergence(
         improvements: Configuration for thresholds
 
     Returns:
-        True if signal should be BLOCKED
+        Tuple of (should_block, bear_market_reason)
+        - should_block: True if signal should be BLOCKED
+        - bear_market_reason: Description of why (for momentum signal generation)
     """
     # Only block bullish (call) signals
     if option_type != "call":
-        return False
+        return (False, "")
 
     if not improvements.divergence_gate_enabled:
-        return False
+        return (False, "")
 
     try:
         check_date = date.fromisoformat(trade_date)
@@ -359,7 +373,8 @@ def check_bear_market_divergence(
         # Death cross is a lagging indicator - can stay active during recovery
         if is_death_cross_active(symbol, as_of_date=check_date):
             if in_downtrend:
-                return True  # Block - death cross AND downtrend
+                reason = "Death cross active AND below 50-day SMA (downtrend)"
+                return (True, reason)
             elif in_recovery:
                 pass  # RECOVERY MODE - don't block
 
@@ -367,9 +382,11 @@ def check_bear_market_divergence(
         high_52w = get_52_week_high(symbol, as_of_date=check_date)
         if high_52w and current_price:
             drawdown_ratio = current_price / high_52w
+            drawdown_pct = (1 - drawdown_ratio) * 100
             if drawdown_ratio < improvements.bear_drawdown_threshold:
                 if in_downtrend:
-                    return True  # Block - significant drawdown AND downtrend
+                    reason = f"{drawdown_pct:.1f}% below 52-week high AND below 50-day SMA"
+                    return (True, reason)
                 elif in_recovery:
                     pass  # RECOVERY MODE - don't block
 
@@ -384,7 +401,8 @@ def check_bear_market_divergence(
                 )
                 if days_below >= improvements.bear_sma_days_required:
                     if in_downtrend:
-                        return True  # Block - sustained below SMA AND downtrend
+                        reason = f"{days_below} days below 200-day SMA AND in downtrend"
+                        return (True, reason)
                     elif in_recovery:
                         pass  # RECOVERY MODE - don't block
 
@@ -392,7 +410,7 @@ def check_bear_market_divergence(
         # If we can't check, don't block
         pass
 
-    return False
+    return (False, "")
 
 
 async def run_portfolio_simulation(
@@ -459,6 +477,22 @@ async def run_portfolio_simulation(
         # Use historical earnings data for backtesting
         if symbol in HISTORICAL_EARNINGS:
             earnings_dates = set(HISTORICAL_EARNINGS[symbol])
+
+    # Initialize momentum signal generator for dual-regime mode
+    momentum_generator = None
+    if improvements.dual_regime_enabled:
+        momentum_config = MomentumSignalConfig(
+            bounce_threshold=improvements.momentum_bounce_threshold,
+            bounce_lookback_days=improvements.momentum_bounce_lookback,
+            resistance_proximity=improvements.momentum_resistance_proximity,
+            oversold_rsi=improvements.momentum_oversold_rsi,
+            enabled=True,
+        )
+        momentum_generator = MomentumSignalGenerator(momentum_config)
+
+    # Tracking for dual-regime statistics
+    momentum_signals_generated = 0
+    sentiment_signals_generated = 0
 
     end_date = datetime.now().strftime("%Y-%m-%d")
     prices_df = get_price_data(symbol, start_date, end_date)
@@ -604,10 +638,34 @@ async def run_portfolio_simulation(
             if entry_trigger:
                 # IMPROVEMENT 5: Price-Sentiment Divergence Gate
                 # Block CALL signals when bear market indicators are triggered
-                if check_bear_market_divergence(
+                is_blocked, bear_reason = check_bear_market_divergence(
                     symbol, date, stock_price, option_type, improvements
-                ):
-                    continue  # Block entry during bear market divergence
+                )
+
+                if is_blocked:
+                    # DUAL-REGIME: Try to generate momentum PUT signal instead of just blocking
+                    if improvements.dual_regime_enabled and momentum_generator:
+                        # Check if PUT direction is available (not already in cooldown)
+                        if "put" not in open_directions:
+                            check_date = datetime.strptime(date, "%Y-%m-%d").date()
+                            momentum_signal = momentum_generator.generate_signal(
+                                symbol, bear_reason, as_of_date=check_date
+                            )
+                            if momentum_signal:
+                                # Switch to PUT signal from momentum generator
+                                entry_trigger = "momentum_put"
+                                option_type = "put"
+                                regime = "bear_momentum"  # Track as separate regime type
+                                momentum_signals_generated += 1
+                            else:
+                                continue  # No momentum signal, skip this entry
+                        else:
+                            continue  # PUT already open, skip
+                    else:
+                        continue  # Block entry during bear market divergence (no dual-regime)
+                else:
+                    # Normal sentiment-based signal
+                    sentiment_signals_generated += 1
 
                 contract = get_option_contract(
                     CACHE_DB, symbol, date, stock_price, option_type, TARGET_DTE
@@ -762,6 +820,10 @@ async def run_portfolio_simulation(
     days_with_positions = sum(1 for eq in equity_curve if eq.num_positions > 0)
     capital_utilization = days_with_positions / total_days * 100 if total_days > 0 else 0
 
+    # Count momentum vs sentiment signals from positions
+    momentum_positions = [p for p in closed_positions if p.regime_type == "bear_momentum"]
+    sentiment_positions = [p for p in closed_positions if p.regime_type != "bear_momentum"]
+
     return {
         "position_size_pct": position_size_pct * 100,
         "starting_capital": STARTING_CAPITAL,
@@ -782,6 +844,12 @@ async def run_portfolio_simulation(
         "max_losing_dollars": abs(max_losing_dollars),
         "equity_curve": equity_curve,
         "positions": closed_positions,
+        # Dual-regime statistics
+        "momentum_trades": len(momentum_positions),
+        "sentiment_trades": len(sentiment_positions),
+        "momentum_winners": len([p for p in momentum_positions if p.pnl_dollar > 0]),
+        "momentum_pnl": sum(p.pnl_dollar for p in momentum_positions),
+        "sentiment_pnl": sum(p.pnl_dollar for p in sentiment_positions),
     }
 
 
@@ -800,7 +868,21 @@ async def main():
         default="2024-01-01",
         help="Start date for simulation in YYYY-MM-DD format (default: 2024-01-01)"
     )
+    parser.add_argument(
+        "--dual-regime",
+        action="store_true",
+        default=True,
+        help="Enable dual-regime mode (momentum PUTs in bear markets). Default: True"
+    )
+    parser.add_argument(
+        "--no-dual-regime",
+        action="store_true",
+        help="Disable dual-regime mode"
+    )
     args = parser.parse_args()
+
+    # Handle dual-regime flag
+    dual_regime_enabled = not args.no_dual_regime
 
     symbol = args.symbol
     start_date = args.start
@@ -812,11 +894,14 @@ async def main():
 
     print("=" * 100)
     print("PORTFOLIO SIMULATION WITH RISK MANAGEMENT IMPROVEMENTS")
+    if dual_regime_enabled:
+        print("  ** DUAL-REGIME MODE ENABLED: Momentum PUTs during bear markets **")
     print("=" * 100)
     print()
     print("Strategy Configuration (mirrors live trading):")
     print(f"  Ticker: {symbol}")
     print(f"  Start date: {start_date}")
+    print(f"  Dual-regime: {'ENABLED' if dual_regime_enabled else 'DISABLED'}")
     print(f"  Regime window: {REGIME_WINDOW} days")
     print(f"  Pullback threshold: {PULLBACK_THRESHOLD}%")
     print(f"  DTE: {TARGET_DTE} days")
@@ -845,10 +930,17 @@ async def main():
         vix_filter_enabled=False,
         dynamic_sizing_enabled=False,
         divergence_gate_enabled=False,
+        dual_regime_enabled=False,
     )
 
-    # Configuration WITH all improvements
-    with_improvements = DEFAULT_IMPROVEMENTS
+    # Configuration WITH all improvements (use command-line flag for dual-regime)
+    with_improvements = ImprovementConfig(
+        earnings_blackout_enabled=True,
+        vix_filter_enabled=True,
+        dynamic_sizing_enabled=True,
+        divergence_gate_enabled=True,
+        dual_regime_enabled=dual_regime_enabled,
+    )
 
     print("Running BASELINE (no improvements)...", end=" ", flush=True)
     baseline_result = await run_portfolio_simulation(
@@ -906,6 +998,22 @@ async def main():
         print(f"  Dynamic sizing: Regime + Tech confirmation multipliers")
     if with_improvements.divergence_gate_enabled:
         print(f"  Divergence gate: Block CALLs when price < {(1-with_improvements.bear_drawdown_threshold)*100:.0f}% of 52wk high")
+    if with_improvements.dual_regime_enabled:
+        print(f"  Dual-regime: Generate momentum PUTs during bear markets")
+        # Show dual-regime breakdown if enabled
+        momentum_trades = improved_result.get('momentum_trades', 0)
+        sentiment_trades = improved_result.get('sentiment_trades', 0)
+        momentum_winners = improved_result.get('momentum_winners', 0)
+        momentum_pnl = improved_result.get('momentum_pnl', 0)
+        sentiment_pnl = improved_result.get('sentiment_pnl', 0)
+        if momentum_trades > 0:
+            momentum_wr = momentum_winners / momentum_trades * 100
+            print()
+            print("  DUAL-REGIME BREAKDOWN:")
+            print(f"    Momentum PUT trades:  {momentum_trades} (win rate: {momentum_wr:.1f}%)")
+            print(f"    Sentiment trades:     {sentiment_trades}")
+            print(f"    Momentum P&L:         ${momentum_pnl:+,.0f}")
+            print(f"    Sentiment P&L:        ${sentiment_pnl:+,.0f}")
     print()
 
     # =========================================================================

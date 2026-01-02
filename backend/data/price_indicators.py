@@ -385,6 +385,98 @@ def get_bear_market_indicators(
     }
 
 
+def get_recent_low(
+    symbol: str,
+    as_of_date: Optional[date] = None,
+    days: int = 5
+) -> Optional[float]:
+    """Get the lowest price in the last N trading days.
+
+    Args:
+        symbol: Stock symbol
+        as_of_date: Calculate as of this date (None = current)
+        days: Number of trading days to look back
+
+    Returns:
+        Lowest closing price in the period or None if unavailable
+    """
+    # Convert trading days to calendar days (roughly 1.5x)
+    calendar_days = int(days * 1.5) + 5
+
+    if as_of_date:
+        df = _get_historical_price_data(symbol, as_of_date, days_back=calendar_days)
+    else:
+        df = _get_price_data(symbol, days_back=calendar_days)
+
+    if df.empty or len(df) < 1:
+        return None
+
+    # Get last N trading days
+    recent_data = df.tail(days)
+    return float(recent_data['Low'].min())
+
+
+def get_recent_high(
+    symbol: str,
+    as_of_date: Optional[date] = None,
+    days: int = 5
+) -> Optional[float]:
+    """Get the highest price in the last N trading days.
+
+    Args:
+        symbol: Stock symbol
+        as_of_date: Calculate as of this date (None = current)
+        days: Number of trading days to look back
+
+    Returns:
+        Highest closing price in the period or None if unavailable
+    """
+    # Convert trading days to calendar days (roughly 1.5x)
+    calendar_days = int(days * 1.5) + 5
+
+    if as_of_date:
+        df = _get_historical_price_data(symbol, as_of_date, days_back=calendar_days)
+    else:
+        df = _get_price_data(symbol, days_back=calendar_days)
+
+    if df.empty or len(df) < 1:
+        return None
+
+    # Get last N trading days
+    recent_data = df.tail(days)
+    return float(recent_data['High'].max())
+
+
+def get_price_n_days_ago(
+    symbol: str,
+    as_of_date: Optional[date] = None,
+    n: int = 1
+) -> Optional[float]:
+    """Get closing price from N trading days ago.
+
+    Args:
+        symbol: Stock symbol
+        as_of_date: Calculate as of this date (None = current)
+        n: Number of trading days back (1 = yesterday)
+
+    Returns:
+        Closing price or None if unavailable
+    """
+    # Convert trading days to calendar days
+    calendar_days = int(n * 1.5) + 5
+
+    if as_of_date:
+        df = _get_historical_price_data(symbol, as_of_date, days_back=calendar_days)
+    else:
+        df = _get_price_data(symbol, days_back=calendar_days)
+
+    if df.empty or len(df) <= n:
+        return None
+
+    # Get the price N days ago (from the end)
+    return float(df['Close'].iloc[-(n + 1)])
+
+
 def clear_cache():
     """Clear the price data cache."""
     global _price_cache, _cache_timestamps

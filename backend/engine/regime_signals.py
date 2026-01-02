@@ -17,6 +17,7 @@ from enum import Enum
 from typing import Optional, Literal
 
 from backend.engine.regime_detector import RegimeDetector, RegimeType, ActiveRegime
+from backend.engine.momentum_signals import MomentumSignalGenerator, MomentumSignalConfig
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ class SignalType(Enum):
     """Trade signal types."""
     BUY_CALL = "BUY_CALL"
     BUY_PUT = "BUY_PUT"
+    MOMENTUM_PUT = "MOMENTUM_PUT"  # Bear market momentum signal
     NO_SIGNAL = "NO_SIGNAL"
 
 
@@ -183,6 +185,7 @@ class SignalGeneratorConfig:
         max_concurrent_positions: Max open positions (default 3)
         min_days_between_entries: Cooldown between entries (default 1)
         position_size_pct: Portfolio % per trade (default 10%)
+        dual_regime_enabled: Enable momentum PUT signals in bear markets (default True)
     """
     pullback_threshold: float = 1.5
     bounce_threshold: float = 1.5
@@ -192,6 +195,7 @@ class SignalGeneratorConfig:
     max_concurrent_positions: int = 3
     min_days_between_entries: int = 1
     position_size_pct: float = 10.0
+    dual_regime_enabled: bool = True
 
 
 class RegimeSignalGenerator:
@@ -246,6 +250,11 @@ class RegimeSignalGenerator:
         # Track open positions by symbol and direction: {symbol: {"call": True, "put": False}}
         self._open_positions_by_direction: dict[str, dict[str, bool]] = {}
         self._open_positions: int = 0
+
+        # Initialize momentum signal generator for dual-regime mode
+        self._momentum_generator: MomentumSignalGenerator | None = None
+        if self.config.dual_regime_enabled:
+            self._momentum_generator = MomentumSignalGenerator(MomentumSignalConfig())
 
     def check_entry_signal(
         self,
@@ -407,6 +416,69 @@ class RegimeSignalGenerator:
             entry_price=0.0,
         )
 
+    def check_momentum_signal(
+        self,
+        symbol: str,
+        bear_market_reason: str,
+        current_price: float,
+    ) -> TradeSignal:
+        """Check for momentum PUT signal during bear market.
+
+        Called when the divergence gate blocks a CALL signal. This method
+        tries to generate a momentum-based PUT signal instead.
+
+        Args:
+            symbol: Stock symbol
+            bear_market_reason: Why bear market was detected
+            current_price: Current stock price
+
+        Returns:
+            TradeSignal (MOMENTUM_PUT if conditions met, NO_SIGNAL otherwise)
+        """
+        now = datetime.now(timezone.utc)
+
+        if not self._momentum_generator:
+            return self._no_signal(symbol, now, "Momentum generator not enabled")
+
+        # Check "while open" cooldown for PUT direction
+        open_dirs = self._open_positions_by_direction.get(symbol, {})
+        if open_dirs.get("put", False):
+            return self._no_signal(symbol, now, "PUT position already open")
+
+        # Check max concurrent positions
+        if self._open_positions >= self.config.max_concurrent_positions:
+            return self._no_signal(
+                symbol, now,
+                f"Max positions reached ({self._open_positions})"
+            )
+
+        # Try to generate momentum signal
+        momentum_signal = self._momentum_generator.generate_signal(
+            symbol, bear_market_reason, as_of_date=None  # None = current date
+        )
+
+        if momentum_signal:
+            reason = f"Momentum PUT: {bear_market_reason} | {', '.join(momentum_signal.reasons[:3])}"
+            logger.info(
+                f"[MOMENTUM SIGNAL] {now.strftime('%Y-%m-%d')} {symbol}: "
+                f"MOMENTUM_PUT triggered - {reason}"
+            )
+
+            return TradeSignal(
+                signal_type=SignalType.MOMENTUM_PUT,
+                symbol=symbol,
+                generated_at=now,
+                regime_type=RegimeType.STRONG_BEARISH,  # Momentum signals are bearish
+                trigger_reason=reason,
+                trigger_pct=0.0,  # Momentum signals don't use pullback/bounce %
+                entry_price=current_price,
+            )
+
+        return self._no_signal(
+            symbol, now,
+            f"Bear market detected but momentum conditions not met"
+        )
+
     def record_entry(self, symbol: str, direction: str = "call") -> None:
         """Record that an entry was taken (for cooldown tracking).
 
@@ -456,6 +528,8 @@ class RegimeSignalGenerator:
             "target_dte": self.config.target_dte,
             "position_size_pct": self.config.position_size_pct,
             "cooldown_strategy": "while_open",
+            "dual_regime_enabled": self.config.dual_regime_enabled,
+            "momentum_generator_active": self._momentum_generator is not None,
             "open_by_direction": {
                 symbol: {d: v for d, v in dirs.items() if v}
                 for symbol, dirs in self._open_positions_by_direction.items()
@@ -532,7 +606,11 @@ def select_atm_option(
     if signal.signal_type == SignalType.NO_SIGNAL:
         return None
 
-    option_type = "call" if signal.signal_type == SignalType.BUY_CALL else "put"
+    # Determine option type - MOMENTUM_PUT also selects put options
+    if signal.signal_type == SignalType.BUY_CALL:
+        option_type = "call"
+    else:  # BUY_PUT or MOMENTUM_PUT
+        option_type = "put"
     target_price = signal.entry_price
     target_dte = config.target_dte
 
