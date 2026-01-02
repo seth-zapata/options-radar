@@ -255,6 +255,59 @@ def classify_regime_technical_only(row: pd.Series) -> Optional[str]:
     return None
 
 
+def detect_bear_market_conditions(
+    symbol: str,
+    date: str,
+    current_price: float
+) -> tuple[bool, str]:
+    """Detect if bear market conditions exist (independent of signal type).
+
+    Returns:
+        (is_bear_market, reason)
+    """
+    try:
+        from datetime import date as date_type
+
+        check_date = date_type.fromisoformat(date)
+
+        # Get 50-day SMA for trend confirmation
+        sma_50 = get_sma(symbol, 50, as_of_date=check_date)
+        in_downtrend = sma_50 and current_price and (current_price < sma_50)
+        in_recovery = sma_50 and current_price and (current_price >= sma_50 * 1.05)
+
+        # Don't trigger in recovery mode
+        if in_recovery:
+            return (False, "")
+
+        # Check 1: Death cross active WITH downtrend
+        if is_death_cross_active(symbol, as_of_date=check_date) and in_downtrend:
+            return (True, "Death cross active AND below 50-day SMA")
+
+        # Check 2: 52-week high drawdown WITH downtrend
+        high_52w = get_52_week_high(symbol, as_of_date=check_date)
+        if high_52w and current_price:
+            drawdown_ratio = current_price / high_52w
+            if drawdown_ratio < BEAR_DRAWDOWN_THRESHOLD and in_downtrend:
+                pct_down = (1 - drawdown_ratio) * 100
+                return (True, f"{pct_down:.1f}% below 52-week high AND downtrend")
+
+        # Check 3: Sustained below 200-day SMA WITH downtrend
+        sma_200 = get_sma(symbol, 200, as_of_date=check_date)
+        if sma_200 and current_price:
+            sma_ratio = current_price / sma_200
+            if sma_ratio < BEAR_SMA_THRESHOLD:
+                days_below = count_consecutive_days_below_sma(
+                    symbol, 200, as_of_date=check_date, threshold_ratio=BEAR_SMA_THRESHOLD
+                )
+                if days_below >= BEAR_SMA_DAYS_REQUIRED and in_downtrend:
+                    return (True, f"Below 200-day SMA for {days_below} days AND downtrend")
+
+    except Exception:
+        pass
+
+    return (False, "")
+
+
 def check_bear_market_divergence(
     symbol: str,
     date: str,
@@ -499,6 +552,10 @@ async def run_sanity_check():
     # "While open" cooldown simulation
     open_directions: set[str] = set()
 
+    # Track bear market days for reporting
+    bear_market_days = 0
+    momentum_attempts = 0
+
     for date in trading_days_2022:
         if date not in technicals_df.index:
             continue
@@ -506,8 +563,71 @@ async def run_sanity_check():
         row = technicals_df.loc[date]
         regime = regime_by_date.get(date, "neutral")
         vix = vix_by_date.get(date, 20.0)
+        current_price = row['Close']
 
-        # Skip neutral regime
+        # FIRST: Check if bear market conditions exist (independent of sentiment)
+        is_bear_market, bear_reason = detect_bear_market_conditions("TSLA", date, current_price)
+        if is_bear_market:
+            bear_market_days += 1
+
+        # INDEPENDENT MOMENTUM CHECK: Run on ALL bear market days
+        # This is separate from sentiment-based signals
+        if is_bear_market:
+            try:
+                from datetime import date as date_type
+                check_date_obj = date_type.fromisoformat(date)
+                momentum_attempts += 1
+
+                momentum_signal = momentum_generator.generate_signal(
+                    "TSLA", bear_reason, as_of_date=check_date_obj
+                )
+                if momentum_signal:
+                    # Create a momentum PUT signal
+                    blocked_by_vix = vix >= VIX_PANIC_THRESHOLD
+                    blocked_by_earnings = is_in_earnings_blackout(date, TSLA_EARNINGS_2022)
+
+                    # Get price 7 days later
+                    price_after_7d = None
+                    correct_direction = None
+                    try:
+                        future_dt = datetime.strptime(date, "%Y-%m-%d") + timedelta(days=7)
+                        for i in range(5):
+                            check_date = (future_dt + timedelta(days=i)).strftime("%Y-%m-%d")
+                            if check_date in technicals_df.index:
+                                price_after_7d = technicals_df.loc[check_date, 'Close']
+                                break
+                        if price_after_7d is not None:
+                            correct_direction = price_after_7d < current_price  # PUT correct if price falls
+                    except (ValueError, KeyError):
+                        pass
+
+                    signal = Signal(
+                        date=date,
+                        signal_type="PUT",
+                        regime="bear_momentum",
+                        tech_confirmations=0,  # Momentum has its own tech check
+                        price_at_signal=current_price,
+                        price_after_7d=price_after_7d,
+                        correct_direction=correct_direction,
+                        vix_level=vix,
+                        blocked_by_vix=blocked_by_vix,
+                        blocked_by_earnings=blocked_by_earnings,
+                        blocked_by_divergence=False,
+                        divergence_reason=bear_reason,
+                        is_momentum_signal=True,
+                        momentum_reasons=momentum_signal.reasons,
+                    )
+                    signals.append(signal)
+                    momentum_signals_generated += 1
+
+                    month = date[:7]
+                    signals_by_month[month]["PUT"] += 1
+                    continue  # Don't also generate sentiment signal for this day
+
+            except Exception as e:
+                pass
+
+        # SENTIMENT-BASED SIGNALS: Skip neutral regime
         if regime == "neutral":
             continue
 
@@ -547,25 +667,8 @@ async def run_sanity_check():
                 "TSLA", date, price_at_signal, signal_type
             )
 
-            # DUAL-REGIME: If CALL blocked, try momentum PUT
-            is_momentum_signal = False
-            momentum_reasons = []
-            if blocked_by_divergence:
-                try:
-                    from datetime import date as date_type
-                    check_date_obj = date_type.fromisoformat(date)
-                    momentum_signal = momentum_generator.generate_signal(
-                        "TSLA", divergence_reason, as_of_date=check_date_obj
-                    )
-                    if momentum_signal:
-                        # Replace blocked CALL with momentum PUT
-                        signal_type = "PUT"
-                        is_momentum_signal = True
-                        momentum_reasons = momentum_signal.reasons
-                        blocked_by_divergence = False  # Not blocked, converted
-                        momentum_signals_generated += 1
-                except Exception as e:
-                    pass  # Keep original blocked status
+            # NOTE: Momentum signals are now generated independently above,
+            # not tied to blocked sentiment signals
 
             # Get price 7 days later for direction check
             price_after_7d = None
@@ -593,7 +696,7 @@ async def run_sanity_check():
             signal = Signal(
                 date=date,
                 signal_type=signal_type,
-                regime=regime if not is_momentum_signal else "bear_momentum",
+                regime=regime,  # Sentiment signals use sentiment regime
                 tech_confirmations=tech_confirms,
                 price_at_signal=price_at_signal,
                 price_after_7d=price_after_7d,
@@ -603,8 +706,8 @@ async def run_sanity_check():
                 blocked_by_earnings=blocked_by_earnings,
                 blocked_by_divergence=blocked_by_divergence,
                 divergence_reason=divergence_reason,
-                is_momentum_signal=is_momentum_signal,
-                momentum_reasons=momentum_reasons,
+                is_momentum_signal=False,  # Sentiment signals are not momentum
+                momentum_reasons=[],
             )
             signals.append(signal)
 
@@ -942,12 +1045,25 @@ async def run_sanity_check():
     print()
 
     print("DUAL-REGIME IMPACT:")
+    print(f"  Bear market days detected:      {bear_market_days}")
+    print(f"  Momentum generator attempts:    {momentum_attempts}")
     print(f"  Momentum PUT signals generated: {len(momentum_signals)}")
     if momentum_signals:
         mom_correct = [s for s in momentum_signals if s.correct_direction == True]
         mom_known = len([s for s in momentum_signals if s.correct_direction is not None])
         if mom_known > 0:
             print(f"  Momentum accuracy: {len(mom_correct)}/{mom_known} ({len(mom_correct)/mom_known*100:.1f}%)")
+        print()
+        print("  Sample momentum signals:")
+        for s in momentum_signals[:10]:  # Show up to 10
+            if s.correct_direction is None:
+                direction = "Unknown"
+            elif s.correct_direction == True:
+                direction = "Correct"
+            else:
+                direction = "Wrong"
+            price_after = f"${s.price_after_7d:.2f}" if s.price_after_7d else "N/A"
+            print(f"    {s.date}: ${s.price_at_signal:.2f} -> {price_after} ({direction})")
     print()
 
     # Conclusion

@@ -61,11 +61,11 @@ class MomentumSignalConfig:
     bounce_lookback_days: int = 7  # Days to look back for recent low (extended from 5)
 
     # Bounce exhaustion - detects when bounce is failing (replaces SMA proximity)
-    exhaustion_giveback_pct: float = 0.40  # Bounce gave back 40%+ of gains
+    exhaustion_giveback_pct: float = 0.30  # Bounce gave back 30%+ of gains (relaxed from 40%)
     exhaustion_red_days: int = 2  # Or 2+ consecutive red days after peak
 
     # RSI thresholds
-    oversold_rsi: float = 25.0  # Don't short below this (capitulation risk)
+    oversold_rsi: float = 20.0  # Don't short below this (extreme panic only, relaxed from 25)
     neutral_rsi: float = 50.0  # Above this is bearish for PUTs
 
     # Technical confirmation requirement

@@ -114,9 +114,9 @@ class ImprovementConfig:
     dual_regime_enabled: bool = True
     momentum_bounce_threshold: float = 0.02  # 2% bounce from low required
     momentum_bounce_lookback: int = 7  # Days to look for recent low (extended from 5)
-    momentum_exhaustion_giveback: float = 0.40  # Bounce gave back 40%+ of gains
+    momentum_exhaustion_giveback: float = 0.30  # Bounce gave back 30%+ of gains (relaxed from 40%)
     momentum_exhaustion_red_days: int = 2  # Or 2+ consecutive red days after peak
-    momentum_oversold_rsi: float = 25.0  # Don't short below this RSI
+    momentum_oversold_rsi: float = 20.0  # Don't short below this RSI (relaxed from 25)
     momentum_min_tech_confirmations: int = 2  # Require at least 2/3 for quality signals
     # Regime strength multipliers
     regime_multipliers: dict = field(default_factory=lambda: {
