@@ -79,7 +79,7 @@ class AutoExecutorConfig:
         max_positions: Maximum concurrent positions (default 3)
         max_contract_price: Don't buy options over this price (default $20)
         min_contract_price: Don't buy options under this price (default $0.50)
-        exit_check_interval: Seconds between exit checks (default 30)
+        exit_check_interval: Seconds between exit checks (default 1s for responsive exits)
         use_limit_orders: Use limit orders at mid price (default True)
         limit_offset_pct: Offset from mid for limit orders (default 0.5%)
     """
@@ -88,7 +88,7 @@ class AutoExecutorConfig:
     max_positions: int = 3
     max_contract_price: float = 20.0
     min_contract_price: float = 0.50
-    exit_check_interval: float = 30.0
+    exit_check_interval: float = 1.0
     use_limit_orders: bool = True
     limit_offset_pct: float = 0.5
 
@@ -339,6 +339,9 @@ class AutoExecutor:
         # Get Alpaca positions for current prices
         try:
             alpaca_positions = {p.symbol: p for p in self.trader.get_option_positions()}
+            open_count = len(self.position_tracker.get_open_positions())
+            if open_count > 0:
+                logger.info(f"[EXIT-MONITOR] Fetched {len(alpaca_positions)} Alpaca positions, tracking {open_count} open")
         except Exception as e:
             logger.error(f"Failed to get Alpaca positions: {e}")
             return exits

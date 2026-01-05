@@ -129,7 +129,7 @@ class AutoExecutionConfig:
     max_positions: int = 3  # Maximum concurrent positions
     max_contract_price: float = 20.0  # Don't buy options over this price
     min_contract_price: float = 0.50  # Don't buy options under this price
-    exit_check_interval: float = 30.0  # Seconds between exit checks
+    exit_check_interval: float = 1.0  # Seconds between exit checks (1s for responsive exits)
     use_limit_orders: bool = True  # Use limit orders at mid price
     limit_offset_pct: float = 0.5  # Offset from mid for limit orders
     simulation_speed: float = 5.0  # Speed multiplier for simulation mode
