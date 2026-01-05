@@ -1429,6 +1429,11 @@ async def lifespan(app: FastAPI):
 
         # Sync positions (only for real Alpaca, not simulation)
         if not SIMULATION_MODE:
+            # Clear stale local positions first, then sync fresh from Alpaca
+            cleared = position_tracker.clear_all_positions()
+            if cleared > 0:
+                logger.info(f"Cleared {cleared} stale local position(s)")
+
             synced = auto_executor.sync_from_alpaca()
             if synced > 0:
                 logger.info(f"Synced {synced} existing position(s) from Alpaca")
