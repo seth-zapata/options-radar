@@ -1508,8 +1508,7 @@ async def lifespan(app: FastAPI):
     # Connect to Alpaca
     await alpaca_client.connect()
 
-    # Set current symbol for paper trading mode
-    global current_symbol
+    # Set current symbol for paper trading mode (global declared at function start)
     current_symbol = "TSLA"  # MVP: Single symbol - TSLA is validated for regime trading
 
     # Set up subscription manager
@@ -1536,34 +1535,64 @@ async def lifespan(app: FastAPI):
         aggregator.update_underlying(initial_underlying)
         logger.info(f"Initial TSLA price: ${initial_price}")
 
-    # Start underlying price polling loop for paper trading
-    async def underlying_price_loop():
-        """Periodically fetch and broadcast underlying price."""
+    # Real-time stock price streaming via Alpaca stocks WebSocket
+    async def stocks_stream_loop():
+        """Connect to Alpaca stocks WebSocket for real-time TSLA prices."""
+        import websockets
+        stocks_url = config.alpaca.stocks_stream_url
+
         while True:
             try:
-                await asyncio.sleep(5)  # Update every 5 seconds
-                price = await subscription_manager._fetch_underlying_price()
-                if price:
-                    # Get existing IV data if available
-                    existing = aggregator.get_underlying("TSLA")
-                    iv_rank = existing.iv_rank if existing else 0.0
-                    iv_pct = existing.iv_percentile if existing else 0.0
+                async with websockets.connect(stocks_url) as ws:
+                    # Authenticate
+                    auth_msg = {
+                        "action": "auth",
+                        "key": config.alpaca.api_key,
+                        "secret": config.alpaca.secret_key,
+                    }
+                    await ws.send(json.dumps(auth_msg))
+                    auth_response = await ws.recv()
+                    logger.debug(f"Stocks WS auth response: {auth_response}")
 
-                    underlying = UnderlyingData(
-                        symbol="TSLA",
-                        price=price,
-                        iv_rank=iv_rank,
-                        iv_percentile=iv_pct,
-                        timestamp=datetime.now(timezone.utc).isoformat(),
-                    )
-                    aggregator.update_underlying(underlying)
+                    # Subscribe to TSLA trades
+                    sub_msg = {
+                        "action": "subscribe",
+                        "trades": ["TSLA"],
+                    }
+                    await ws.send(json.dumps(sub_msg))
+                    sub_response = await ws.recv()
+                    logger.info(f"Subscribed to TSLA stock trades: {sub_response}")
+
+                    # Process messages
+                    async for message in ws:
+                        try:
+                            data = json.loads(message)
+                            for item in data:
+                                if item.get("T") == "t":  # Trade message
+                                    price = item.get("p")
+                                    if price:
+                                        # Get existing IV data
+                                        existing = aggregator.get_underlying("TSLA")
+                                        iv_rank = existing.iv_rank if existing else 0.0
+                                        iv_pct = existing.iv_percentile if existing else 0.0
+
+                                        underlying = UnderlyingData(
+                                            symbol="TSLA",
+                                            price=float(price),
+                                            iv_rank=iv_rank,
+                                            iv_percentile=iv_pct,
+                                            timestamp=datetime.now(timezone.utc).isoformat(),
+                                        )
+                                        aggregator.update_underlying(underlying)
+                        except json.JSONDecodeError:
+                            pass
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.debug(f"Error updating underlying price: {e}")
+                logger.warning(f"Stocks WebSocket error: {e}, reconnecting in 5s...")
                 await asyncio.sleep(5)
 
-    task = asyncio.create_task(underlying_price_loop())
+    task = asyncio.create_task(stocks_stream_loop())
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
