@@ -486,11 +486,11 @@ async def gate_evaluation_loop() -> None:
     global _last_recommendation_time, _last_symbol_recommendation_time
     global regime_detector, regime_signal_generator
 
-    logger.info("Starting gate evaluation loop (5s interval, multi-symbol)")
+    logger.info("Starting gate evaluation loop (1s interval, multi-symbol)")
 
     while True:
         try:
-            await asyncio.sleep(5)  # Evaluate every 5 seconds
+            await asyncio.sleep(1)  # Evaluate every 1 second for responsive signal generation
 
             now = datetime.now(timezone.utc)
             now_ts = now.timestamp()
@@ -544,8 +544,9 @@ async def gate_evaluation_loop() -> None:
                 if regime_detector and regime_signal_generator:
 
                     # Update regime with WSB sentiment if available
+                    # Note: wsb_score is -100 to +100, regime detector expects -1 to +1
                     if sentiment and sentiment.wsb_score is not None:
-                        regime_detector.update_regime(symbol, sentiment.wsb_score)
+                        regime_detector.update_regime(symbol, sentiment.wsb_score / 100.0)
 
                     # Check for regime signals using OHLC from underlying
                     # Note: In live trading, we'd get intraday OHLC from minute bars
@@ -2689,7 +2690,8 @@ async def get_regime_status(symbol: str = "TSLA") -> dict[str, Any]:
                 sentiment = await scanner._sentiment_aggregator.get_sentiment(symbol)
                 if sentiment and sentiment.wsb_score is not None:
                     # Update regime with fresh WSB sentiment
-                    regime_detector.update_regime(symbol, sentiment.wsb_score)
+                    # Note: wsb_score is -100 to +100, regime detector expects -1 to +1
+                    regime_detector.update_regime(symbol, sentiment.wsb_score / 100.0)
                     active_regime = regime_detector.get_active_regime(symbol)
         except Exception as e:
             logger.debug(f"Could not fetch WSB sentiment for {symbol}: {e}")
