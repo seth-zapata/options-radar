@@ -277,7 +277,7 @@ class AppConfig:
     # Staleness thresholds (seconds)
     quote_stale_threshold: float = 5.0
     greeks_stale_threshold: float = 90.0
-    underlying_stale_threshold: float = 2.0
+    underlying_stale_threshold: float = 5.0  # Increased to match quote threshold
 
     # Reconnection settings
     ws_reconnect_base_delay: float = 1.0

@@ -211,9 +211,9 @@ class Gate(ABC):
 # =============================================================================
 
 class UnderlyingPriceFreshGate(Gate):
-    """Ensures underlying price data is fresh (< 2 seconds)."""
+    """Ensures underlying price data is fresh (< 5 seconds)."""
 
-    THRESHOLD = 2.0  # seconds
+    THRESHOLD = 5.0  # seconds (matches quote freshness threshold)
 
     @property
     def name(self) -> str:
