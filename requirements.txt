@@ -14,6 +14,11 @@ aiohttp>=3.9.0
 
 # Market data
 yfinance>=0.2.36
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Trading
+alpaca-py>=0.20.0
 
 # Async utilities
 anyio>=4.2.0
