@@ -149,16 +149,17 @@ class DailyScanner:
         self,
         symbols: list[str] | None = None,
     ) -> list[ScanResult]:
-        """Scan all symbols in watchlist for opportunities.
+        """Scan symbols for opportunities.
 
         Args:
-            symbols: Optional list of symbols to scan. Uses config watchlist if not provided.
+            symbols: Optional list of symbols to scan. Uses enabled_symbols if not provided.
 
         Returns:
             List of ScanResult sorted by score (highest first)
         """
         if symbols is None:
-            symbols = list(self.config.watchlist)
+            # Only scan regime-enabled symbols (TSLA) to avoid wasting API quota
+            symbols = list(self.config.regime_strategy.enabled_symbols)
 
         logger.info(f"Scanning {len(symbols)} symbols for opportunities...")
 
