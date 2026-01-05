@@ -676,10 +676,10 @@ class GatingPipeline:
             options_modifier = options_indicators.get_directional_modifier(is_bullish)
             if options_modifier != 0:
                 base_confidence += options_modifier
+                pcr_str = f"{options_indicators.put_call_ratio:.2f}" if options_indicators.put_call_ratio else "N/A"
                 logger.info(
                     f"Applied {options_modifier:+d} P/C Ratio modifier "
-                    f"[P/C={options_indicators.put_call_ratio:.2f if options_indicators.put_call_ratio else 'N/A'}, "
-                    f"Signal={options_indicators.pcr_signal}]"
+                    f"[P/C={pcr_str}, Signal={options_indicators.pcr_signal}]"
                 )
 
         return max(0, min(100, base_confidence))

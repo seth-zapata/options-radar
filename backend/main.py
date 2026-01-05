@@ -196,8 +196,9 @@ async def get_options_indicators(symbol: str) -> OptionsIndicators | None:
 
         _options_indicators_cache[symbol] = (indicators, now)
 
+        pcr_str = f"{put_call_ratio:.2f}" if put_call_ratio else "N/A"
         logger.info(
-            f"Alpaca {symbol}: P/C={put_call_ratio:.2f if put_call_ratio else 'N/A'} "
+            f"Alpaca {symbol}: P/C={pcr_str} "
             f"({pcr_signal}), {chain_data.get('num_contracts', 0)} contracts"
         )
         return indicators

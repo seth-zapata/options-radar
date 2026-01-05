@@ -108,19 +108,24 @@ class ConnectionManager:
         data = json.dumps(message)
 
         # Send to all clients, removing any that fail
+        # Copy the set to avoid "Set changed size during iteration" errors
         disconnected: list[WebSocket] = []
 
         async with self._lock:
-            for websocket in self._connections:
-                try:
-                    await websocket.send_text(data)
-                except Exception as e:
-                    logger.warning(f"Failed to send to client: {e}")
-                    disconnected.append(websocket)
+            connections_snapshot = set(self._connections)
 
-            # Clean up disconnected clients
-            for ws in disconnected:
-                self._connections.discard(ws)
+        for websocket in connections_snapshot:
+            try:
+                await websocket.send_text(data)
+            except Exception as e:
+                logger.warning(f"Failed to send to client: {e}")
+                disconnected.append(websocket)
+
+        # Clean up disconnected clients
+        if disconnected:
+            async with self._lock:
+                for ws in disconnected:
+                    self._connections.discard(ws)
 
     async def broadcast_option_update(self, option_data: dict[str, Any]) -> None:
         """Broadcast an option update to all clients.

@@ -410,10 +410,11 @@ class AlpacaRestClient:
             if total_call_oi > 0:
                 put_call_ratio = total_put_oi / total_call_oi
 
+            pcr_str = f"{put_call_ratio:.3f}" if put_call_ratio else "N/A"
             logger.info(
                 f"Alpaca options chain for {underlying}: {len(all_contracts)} contracts, "
                 f"call_oi={total_call_oi}, put_oi={total_put_oi}, "
-                f"P/C={put_call_ratio:.3f if put_call_ratio else 'N/A'}"
+                f"P/C={pcr_str}"
             )
 
             return {
