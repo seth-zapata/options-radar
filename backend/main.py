@@ -1508,6 +1508,10 @@ async def lifespan(app: FastAPI):
     # Connect to Alpaca
     await alpaca_client.connect()
 
+    # Set current symbol for paper trading mode
+    global current_symbol
+    current_symbol = "TSLA"  # MVP: Single symbol - TSLA is validated for regime trading
+
     # Set up subscription manager
     subscription_manager = SubscriptionManager(
         config=config.alpaca,
@@ -1518,6 +1522,50 @@ async def lifespan(app: FastAPI):
     await subscription_manager.start()
 
     logger.info(f"Subscribed to {subscription_manager.subscribed_count} contracts")
+
+    # Broadcast initial underlying price to frontend
+    initial_price = subscription_manager._current_atm  # Use ATM as approximation
+    if initial_price:
+        initial_underlying = UnderlyingData(
+            symbol="TSLA",
+            price=float(initial_price),
+            iv_rank=0.0,  # Will be updated by ORATS
+            iv_percentile=0.0,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        aggregator.update_underlying(initial_underlying)
+        logger.info(f"Initial TSLA price: ${initial_price}")
+
+    # Start underlying price polling loop for paper trading
+    async def underlying_price_loop():
+        """Periodically fetch and broadcast underlying price."""
+        while True:
+            try:
+                await asyncio.sleep(5)  # Update every 5 seconds
+                price = await subscription_manager._fetch_underlying_price()
+                if price:
+                    # Get existing IV data if available
+                    existing = aggregator.get_underlying("TSLA")
+                    iv_rank = existing.iv_rank if existing else 0.0
+                    iv_pct = existing.iv_percentile if existing else 0.0
+
+                    underlying = UnderlyingData(
+                        symbol="TSLA",
+                        price=price,
+                        iv_rank=iv_rank,
+                        iv_percentile=iv_pct,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                    )
+                    aggregator.update_underlying(underlying)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"Error updating underlying price: {e}")
+                await asyncio.sleep(5)
+
+    task = asyncio.create_task(underlying_price_loop())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
     # Start background tasks
     task = asyncio.create_task(alpaca_message_loop())
