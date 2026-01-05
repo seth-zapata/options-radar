@@ -1336,18 +1336,12 @@ async def lifespan(app: FastAPI):
     aggregator.on_option_update = sync_option_callback
     aggregator.on_underlying_update = sync_underlying_callback
 
-    # Quote counter for logging
+    # Quote counter (logging disabled - too verbose during market hours)
     quote_count = [0]
 
     def on_quote_received(quote):
-        """Log and forward quotes to aggregator."""
+        """Forward quotes to aggregator (logging disabled for cleaner logs)."""
         quote_count[0] += 1
-        if quote_count[0] <= 5 or quote_count[0] % 100 == 0:
-            logger.info(
-                f"Quote #{quote_count[0]}: {quote.canonical_id.underlying} "
-                f"{quote.canonical_id.strike}{quote.canonical_id.right} "
-                f"Bid: ${quote.bid:.2f} Ask: ${quote.ask:.2f}"
-            )
         aggregator.update_quote(quote)
 
     alpaca_client = AlpacaOptionsClient(
