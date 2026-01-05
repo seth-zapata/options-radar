@@ -545,8 +545,13 @@ async def gate_evaluation_loop() -> None:
 
                     # Update regime with WSB sentiment if available
                     # Note: wsb_score is -100 to +100, regime detector expects -1 to +1
-                    if sentiment and sentiment.wsb_score is not None:
-                        regime_detector.update_regime(symbol, sentiment.wsb_score / 100.0)
+                    # Check wsb_sentiment object (not wsb_score) since score defaults to 0.0 when no data
+                    if sentiment and sentiment.wsb_sentiment is not None:
+                        normalized_sentiment = sentiment.wsb_score / 100.0
+                        logger.debug(f"[REGIME] {symbol} WSB sentiment: {sentiment.wsb_score:.1f} → normalized: {normalized_sentiment:.3f}")
+                        regime_detector.update_regime(symbol, normalized_sentiment)
+                    elif sentiment:
+                        logger.debug(f"[REGIME] {symbol} No WSB data available (skipping regime update)")
 
                     # Check for regime signals using OHLC from underlying
                     # Note: In live trading, we'd get intraday OHLC from minute bars
@@ -2688,7 +2693,7 @@ async def get_regime_status(symbol: str = "TSLA") -> dict[str, Any]:
             scanner = get_scanner()
             if scanner._sentiment_aggregator:
                 sentiment = await scanner._sentiment_aggregator.get_sentiment(symbol)
-                if sentiment and sentiment.wsb_score is not None:
+                if sentiment and sentiment.wsb_sentiment is not None:
                     # Update regime with fresh WSB sentiment
                     # Note: wsb_score is -100 to +100, regime detector expects -1 to +1
                     regime_detector.update_regime(symbol, sentiment.wsb_score / 100.0)
