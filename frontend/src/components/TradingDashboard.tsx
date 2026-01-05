@@ -6,7 +6,8 @@
 import { useEffect, useState } from 'react';
 import { useOptionsStore } from '../store/optionsStore';
 import type { RegimeStatus, RegimeSignal, RegimeType, TrackedPosition, ExitSignal } from '../types';
-import { ChainView } from './ChainView';
+// ChainView disabled - too much overhead during market hours
+// import { ChainView } from './ChainView';
 import { TradingControlPanel } from './TradingControlPanel';
 
 const API_BASE = 'http://localhost:8000';
@@ -594,7 +595,6 @@ export function TradingDashboard() {
 
   const [selectedSignal, setSelectedSignal] = useState<RegimeSignal | null>(null);
   const [confirmedSignals, setConfirmedSignals] = useState<Set<string>>(new Set());
-  const [showOptionsChain, setShowOptionsChain] = useState(false);
 
   // Filter TSLA positions
   const tslaPositions = positions.filter(p => p.underlying === 'TSLA' && (p.status === 'open' || p.status === 'exit_signal'));
@@ -798,29 +798,9 @@ export function TradingDashboard() {
       {/* Trade History Section */}
       <TradeHistory positions={positions} />
 
-      {/* Collapsible Options Chain */}
-      <div className="bg-white rounded-lg shadow overflow-hidden">
-        <button
-          onClick={() => setShowOptionsChain(!showOptionsChain)}
-          className="w-full px-4 py-3 flex items-center justify-between bg-slate-50 hover:bg-slate-100 transition-colors"
-        >
-          <div className="flex items-center gap-2">
-            <span className={`transform transition-transform ${showOptionsChain ? 'rotate-90' : ''}`}>
-              ▶
-            </span>
-            <span className="font-medium text-slate-700">Options Chain</span>
-            <span className="text-sm text-slate-500">(for manual trades)</span>
-          </div>
-          <span className="text-sm text-slate-500">
-            {showOptionsChain ? 'Click to collapse' : 'Click to expand'}
-          </span>
-        </button>
-        {showOptionsChain && (
-          <div className="border-t">
-            <ChainView />
-          </div>
-        )}
-      </div>
+      {/* Options Chain - Disabled to reduce frontend overhead during market hours
+          Backend has all options data for signal generation.
+          View options chains on your broker platform instead. */}
 
       {/* Trade Modal */}
       {selectedSignal && (

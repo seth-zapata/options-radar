@@ -157,7 +157,9 @@ export function useOptionsStream() {
 
             switch (message.type) {
               case 'option_update':
-                updateOption(message.data as OptionData);
+                // Skip option updates - causes too many re-renders during market hours
+                // Backend has the data for signal generation, frontend doesn't need it
+                // updateOption(message.data as OptionData);
                 break;
 
               case 'underlying_update':
