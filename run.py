@@ -7,8 +7,17 @@ Usage:
     python run.py --mode paper       # Live data + Alpaca paper trading
     python run.py --mode live        # Live data + real trading (careful!)
 
+    # With scalping (0DTE/1DTE intraday momentum)
+    python run.py --mode paper --scalping
+
+    # Backtest scalping strategy
+    python run.py --backtest /path/to/databento/data --start 2024-01-01 --end 2024-12-31
+
 Options:
     --mode          Mode preset: mock, simulation, paper, live
+    --scalping      Enable scalping module (0DTE/1DTE momentum trading)
+    --backtest      Run scalping backtest with DataBento data
+    --start/--end   Date range for backtest (YYYY-MM-DD)
     --speed         Simulation speed multiplier (default: 5.0)
     --no-auto       Disable auto-execution
     --port          Backend port (default: 8000)
@@ -50,6 +59,69 @@ MODE_PRESETS = {
 }
 
 
+def run_backtest(args):
+    """Run scalping backtest with DataBento data."""
+    from datetime import datetime
+    from pathlib import Path
+    import json
+
+    # Import components
+    from backend.scalping.config import ScalpConfig
+    from backend.scalping.replay import QuoteReplaySystem
+    from backend.scalping.signal_generator import ScalpSignalGenerator
+    from backend.scalping.velocity_tracker import PriceVelocityTracker
+    from backend.scalping.volume_analyzer import VolumeAnalyzer
+    from backend.scalping.technical_scalper import TechnicalScalper
+    from backend.scalping.scalp_backtester import ScalpBacktester
+
+    # Parse dates
+    start_date = datetime.fromisoformat(args.start) if args.start else None
+    end_date = datetime.fromisoformat(args.end) if args.end else None
+
+    # Setup
+    config = ScalpConfig(enabled=True)
+    replay = QuoteReplaySystem()
+
+    data_path = Path(args.backtest)
+    print(f"Loading data from {data_path}...")
+    replay.load_data(data_path, start_date, end_date)
+    print(f"Loaded {replay.quote_count} quotes")
+
+    if replay.quote_count == 0:
+        print("No data loaded. Check the data path and date range.")
+        sys.exit(1)
+
+    # Create components
+    velocity = PriceVelocityTracker("TSLA")
+    volume = VolumeAnalyzer()
+    technical = TechnicalScalper("TSLA")
+
+    generator = ScalpSignalGenerator(
+        symbol="TSLA",
+        config=config,
+        velocity_tracker=velocity,
+        volume_analyzer=volume,
+        technical_scalper=technical,
+    )
+
+    # Run backtest
+    print("Running backtest...")
+    backtester = ScalpBacktester(config, replay, generator)
+    result = backtester.run(start_date, end_date)
+
+    # Print summary
+    print()
+    print(result.summary())
+
+    # Save to file if requested
+    if args.output:
+        output_data = result.to_dict()
+        output_data["trades"] = [t.to_dict() for t in result.trades]
+        with open(args.output, "w") as f:
+            json.dump(output_data, f, indent=2)
+        print(f"\nResults saved to {args.output}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="OptionsRadar backend + frontend runner",
@@ -60,8 +132,13 @@ Examples:
     python run.py --mode simulation        # Fast testing with fake trades
     python run.py --mode simulation --speed 10  # 10x speed simulation
     python run.py --mode paper             # Paper trading (market hours)
+    python run.py --mode paper --scalping  # Paper trading with scalping
     python run.py --mode live              # Live trading (be careful!)
     python run.py --mode mock --backend-only  # Backend only
+
+    # Scalping backtest
+    python run.py --backtest ./data/tsla --start 2024-01-01 --end 2024-12-31
+    python run.py --backtest ./data/tsla -o results.json
         """,
     )
     parser.add_argument(
@@ -69,6 +146,28 @@ Examples:
         choices=["mock", "simulation", "paper", "live"],
         default="mock",
         help="Trading mode preset (default: mock)",
+    )
+    parser.add_argument(
+        "--scalping",
+        action="store_true",
+        help="Enable scalping module (0DTE/1DTE momentum trading)",
+    )
+    parser.add_argument(
+        "--backtest",
+        metavar="DATA_PATH",
+        help="Run scalping backtest with DataBento data at this path",
+    )
+    parser.add_argument(
+        "--start",
+        help="Backtest start date (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--end",
+        help="Backtest end date (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--output", "-o",
+        help="Output JSON file for backtest results",
     )
     parser.add_argument(
         "--speed",
@@ -112,6 +211,14 @@ Examples:
 
     args = parser.parse_args()
 
+    # Handle backtest mode separately
+    if args.backtest:
+        print("=" * 60)
+        print("OptionsRadar - SCALPING BACKTEST")
+        print("=" * 60)
+        run_backtest(args)
+        return
+
     # Get project root
     project_root = Path(__file__).parent.absolute()
     frontend_dir = project_root / "frontend"
@@ -124,6 +231,9 @@ Examples:
     # Apply overrides
     if args.no_auto:
         env["AUTO_EXECUTE"] = "false"
+
+    if args.scalping:
+        env["SCALPING_ENABLED"] = "true"
 
     env["SIMULATION_SPEED"] = str(args.speed)
 
@@ -138,11 +248,16 @@ Examples:
 
     # Print configuration
     print("=" * 60)
-    print(f"OptionsRadar - {args.mode.upper()} MODE")
+    mode_label = f"{args.mode.upper()} MODE"
+    if args.scalping:
+        mode_label += " + SCALPING"
+    print(f"OptionsRadar - {mode_label}")
     print("=" * 60)
     print(f"  MOCK_DATA:     {env.get('MOCK_DATA')}")
     print(f"  TRADING_MODE:  {env.get('TRADING_MODE')}")
     print(f"  AUTO_EXECUTE:  {env.get('AUTO_EXECUTE')}")
+    if args.scalping:
+        print(f"  SCALPING:      enabled (0DTE/1DTE momentum)")
     if args.mode == "simulation":
         print(f"  SPEED:         {args.speed}x")
     print(f"  BACKEND:       http://localhost:{args.port}")
