@@ -249,6 +249,7 @@ export interface TradingStatus {
   enabled: boolean;
   auto_execution: boolean;
   simulation_mode: boolean;
+  scalping_enabled: boolean;
   open_positions: number;
   max_positions: number;
   position_size_pct: number;

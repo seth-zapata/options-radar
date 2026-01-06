@@ -2382,12 +2382,14 @@ async def get_trading_status() -> dict[str, Any]:
             "configured": False,
             "enabled": False,
             "simulation_mode": SIMULATION_MODE,
+            "scalping_enabled": SCALPING_ENABLED,
             "error": "Auto-execution not configured",
         }
 
     return {
         "configured": True,
         "simulation_mode": SIMULATION_MODE,
+        "scalping_enabled": SCALPING_ENABLED,
         **auto_executor.get_status(),
     }
 

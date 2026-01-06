@@ -4,6 +4,7 @@
  */
 
 import { useEffect, useState, useCallback } from 'react';
+import { useOptionsStore } from '../store/optionsStore';
 import type { TradingStatus, AlpacaAccount, AlpacaPosition, SimulationStatus } from '../types';
 
 const API_BASE = 'http://localhost:8000';
@@ -17,17 +18,24 @@ export function TradingControlPanel() {
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
 
+  // Sync scalping status to store
+  const setScalpEnabled = useOptionsStore((state) => state.setScalpEnabled);
+
   const fetchStatus = useCallback(async () => {
     try {
       const response = await fetch(`${API_BASE}/api/trading/status`);
       if (!response.ok) throw new Error('Failed to fetch status');
       const data = await response.json();
       setStatus(data);
+      // Sync scalping enabled status to the store
+      if (data.scalping_enabled !== undefined) {
+        setScalpEnabled(data.scalping_enabled);
+      }
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to fetch status');
     }
-  }, []);
+  }, [setScalpEnabled]);
 
   const fetchAccount = useCallback(async () => {
     try {
