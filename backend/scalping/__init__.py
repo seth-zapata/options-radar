@@ -23,6 +23,16 @@ Phase 3 (Signal Generation): COMPLETE
 - ScalpTrade: Completed trade record with P&L
 - BacktestResult: Aggregate backtest statistics
 - ScalpBacktester: Backtest scalping strategy on historical data
+
+Phase 4 (Live Integration): COMPLETE
+- Integrated with main.py for real-time signal generation
+- WebSocket broadcast of scalp_signal events
+
+Phase 5 (Execution & Monitoring): COMPLETE
+- ScalpPosition: Active scalp position with live state
+- ScalpExecutor: Execute signals and monitor for exits
+- ScalpExecutionResult: Execution result with order info
+- ScalpExitResult: Exit result with P&L
 """
 
 from backend.scalping.config import (
@@ -64,6 +74,13 @@ from backend.scalping.scalp_backtester import (
     ScalpBacktester,
     ScalpTrade,
 )
+from backend.scalping.scalp_executor import (
+    ScalpExecutor,
+    ScalpExecutorConfig,
+    ScalpExecutionResult,
+    ScalpExitResult,
+    ScalpPosition,
+)
 
 __all__ = [
     # Config
@@ -98,4 +115,10 @@ __all__ = [
     "ScalpTrade",
     "BacktestResult",
     "ScalpBacktester",
+    # Executor
+    "ScalpExecutor",
+    "ScalpExecutorConfig",
+    "ScalpExecutionResult",
+    "ScalpExitResult",
+    "ScalpPosition",
 ]

@@ -83,6 +83,11 @@ from backend.scalping import (
     ScalpConfig,
     ScalpSignal,
     ScalpSignalGenerator,
+    ScalpExecutor,
+    ScalpExecutorConfig,
+    ScalpExecutionResult,
+    ScalpExitResult,
+    ScalpPosition,
 )
 
 # Check for mock mode
@@ -137,6 +142,7 @@ scalp_volume_analyzer: VolumeAnalyzer | None = None
 scalp_technical_scalpers: dict[str, TechnicalScalper] = {}  # Per-symbol technicals
 scalp_signal_generators: dict[str, ScalpSignalGenerator] = {}  # Per-symbol generators
 scalp_config: ScalpConfig | None = None
+scalp_executor: ScalpExecutor | None = None  # Scalp execution and exit monitoring
 SCALPING_ENABLED = False  # Master enable from config
 
 # Auto-execution components (paper trading only)
@@ -753,6 +759,21 @@ async def gate_evaluation_loop() -> None:
                                 "timestamp": now.isoformat(),
                             })
 
+                            # Auto-execute the scalp signal if executor is enabled
+                            if scalp_executor and scalp_executor.config.enabled:
+                                try:
+                                    exec_result = await scalp_executor.execute_signal(scalp_signal)
+                                    if exec_result.success:
+                                        logger.info(
+                                            f"[SCALP-EXEC] Executed {scalp_signal.signal_type}: "
+                                            f"{exec_result.position.contracts}x {scalp_signal.option_symbol} "
+                                            f"@ ${exec_result.fill_price:.2f}"
+                                        )
+                                    else:
+                                        logger.warning(f"[SCALP-EXEC] Failed: {exec_result.error}")
+                                except Exception as e:
+                                    logger.error(f"[SCALP-EXEC] Error: {e}")
+
                     except Exception as e:
                         logger.debug(f"[SCALP] Error evaluating {symbol}: {e}")
 
@@ -1235,6 +1256,53 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Could not initialize scalping module: {e}")
         SCALPING_ENABLED = False
+
+    # Initialize scalp executor if scalping and trading are both enabled
+    global scalp_executor
+    if SCALPING_ENABLED and alpaca_trader:
+        try:
+            # Callbacks for WebSocket broadcasts
+            async def on_scalp_execution(result: ScalpExecutionResult):
+                """Broadcast scalp position opened."""
+                await connection_manager.broadcast({
+                    "type": "scalp_position_opened",
+                    "data": result.to_dict(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
+            async def on_scalp_exit(result: ScalpExitResult):
+                """Broadcast scalp position closed."""
+                await connection_manager.broadcast({
+                    "type": "scalp_position_closed",
+                    "data": result.to_dict(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
+            async def on_scalp_update(position: ScalpPosition):
+                """Broadcast scalp position update."""
+                await connection_manager.broadcast({
+                    "type": "scalp_position_update",
+                    "data": position.to_dict(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
+            scalp_executor = ScalpExecutor(
+                trader=alpaca_trader,
+                config=ScalpExecutorConfig(
+                    enabled=True,
+                    max_concurrent_scalps=1,  # One scalp at a time
+                    exit_check_interval=0.5,  # Check every 500ms
+                ),
+                on_execution=on_scalp_execution,
+                on_exit=on_scalp_exit,
+                on_update=on_scalp_update,
+            )
+
+            # Start exit monitoring
+            await scalp_executor.start_exit_monitor()
+            logger.info("[SCALP-EXEC] Scalp executor initialized with exit monitoring")
+        except Exception as e:
+            logger.warning(f"Could not initialize scalp executor: {e}")
 
     # Check for mock mode
     if MOCK_MODE:
