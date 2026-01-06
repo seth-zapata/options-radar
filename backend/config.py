@@ -254,6 +254,18 @@ class RiskManagementConfig:
 
 
 @dataclass(frozen=True)
+class ScalpingModuleConfig:
+    """Scalping module configuration (high-level enable/disable).
+
+    Detailed scalping config is in backend/scalping/config.py.
+    This provides the top-level enable and data directory settings.
+    """
+
+    enabled: bool = False  # Master enable for scalping module
+    databento_data_dir: str | None = None  # Path to DataBento CBBO data
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Main application configuration."""
 
@@ -298,6 +310,9 @@ class AppConfig:
 
     # Dual-regime configuration (bear market momentum signals)
     dual_regime: DualRegimeConfig = DualRegimeConfig()
+
+    # Scalping module configuration
+    scalping: ScalpingModuleConfig = ScalpingModuleConfig()
 
 
 def _get_env_or_raise(key: str) -> str:
@@ -388,5 +403,9 @@ def load_config() -> AppConfig:
             oversold_rsi=float(os.getenv("MOMENTUM_OVERSOLD_RSI", "25")),
             neutral_rsi=float(os.getenv("MOMENTUM_NEUTRAL_RSI", "50")),
             vix_max_for_puts=float(os.getenv("MOMENTUM_VIX_MAX", "35")),
+        ),
+        scalping=ScalpingModuleConfig(
+            enabled=_get_env_bool("SCALP_ENABLED", default=False),
+            databento_data_dir=os.getenv("DATABENTO_DATA_DIR"),
         ),
     )

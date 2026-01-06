@@ -17,6 +17,9 @@ yfinance>=0.2.36
 pandas>=2.0.0
 numpy>=1.24.0
 
+# DataBento historical data (for scalping backtest)
+zstandard>=0.22.0
+
 # Trading
 alpaca-py>=0.20.0
 
