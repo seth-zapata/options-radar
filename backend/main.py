@@ -75,6 +75,16 @@ from backend.logging import (
 from backend.models.market_data import UnderlyingData
 from backend.websocket import ConnectionManager
 
+# Scalping module imports
+from backend.scalping import (
+    PriceVelocityTracker,
+    VolumeAnalyzer,
+    TechnicalScalper,
+    ScalpConfig,
+    ScalpSignal,
+    ScalpSignalGenerator,
+)
+
 # Check for mock mode
 MOCK_MODE = os.environ.get("MOCK_DATA", "").lower() in ("true", "1", "yes")
 
@@ -120,6 +130,14 @@ session_replayer = SessionReplayer(persist_path="./logs/replays")
 # Regime-filtered strategy components (validated: 71 trades, 43.7% win, +17.4% avg return)
 regime_detector: RegimeDetector | None = None
 regime_signal_generator: RegimeSignalGenerator | None = None
+
+# Scalping module components (0DTE/1DTE momentum-based signals)
+scalp_velocity_trackers: dict[str, PriceVelocityTracker] = {}  # Per-symbol velocity
+scalp_volume_analyzer: VolumeAnalyzer | None = None
+scalp_technical_scalpers: dict[str, TechnicalScalper] = {}  # Per-symbol technicals
+scalp_signal_generators: dict[str, ScalpSignalGenerator] = {}  # Per-symbol generators
+scalp_config: ScalpConfig | None = None
+SCALPING_ENABLED = False  # Master enable from config
 
 # Auto-execution components (paper trading only)
 alpaca_trader: AlpacaTrader | MockAlpacaTrader | None = None
@@ -678,6 +696,66 @@ async def gate_evaluation_loop() -> None:
                                 except Exception as e:
                                     logger.error(f"[AUTO-EXEC] Error executing signal: {e}")
 
+                # === SCALPING MODULE: Check for intraday momentum signals ===
+                if SCALPING_ENABLED and symbol in scalp_signal_generators:
+                    try:
+                        generator = scalp_signal_generators[symbol]
+                        velocity_tracker = scalp_velocity_trackers[symbol]
+                        technical_scalper = scalp_technical_scalpers[symbol]
+
+                        # Update velocity tracker with current price
+                        velocity_tracker.add_price(underlying.price, now)
+
+                        # Update technical scalper (VWAP, S/R levels)
+                        # Use option volume as proxy for underlying volume
+                        total_volume = sum(o.volume or 0 for o in all_options)
+                        technical_scalper.update(underlying.price, volume=total_volume, timestamp=now)
+
+                        # Build available options list for scalping (0-1 DTE only)
+                        today = now.date()
+                        tomorrow = today + timedelta(days=1)
+                        scalp_options = []
+                        for o in all_options:
+                            try:
+                                exp_date = datetime.strptime(o.canonical_id.expiry, "%Y-%m-%d").date()
+                                dte = (exp_date - today).days
+                                if dte <= 1:  # 0DTE or 1DTE only
+                                    scalp_options.append({
+                                        "symbol": f"{symbol}{o.canonical_id.expiry.replace('-', '')[2:]}{o.canonical_id.right}{int(o.canonical_id.strike * 1000):08d}",
+                                        "strike": o.canonical_id.strike,
+                                        "expiry": o.canonical_id.expiry,
+                                        "option_type": o.canonical_id.right,
+                                        "delta": o.delta or 0.5,
+                                        "bid_px": o.bid or 0,
+                                        "ask_px": o.ask or 0,
+                                        "dte": dte,
+                                    })
+                            except (ValueError, AttributeError):
+                                continue
+
+                        generator.update_available_options(scalp_options)
+
+                        # Evaluate for scalp signal
+                        scalp_signal = generator.evaluate(now, underlying.price)
+
+                        if scalp_signal:
+                            logger.info(
+                                f"[SCALP SIGNAL] {symbol}: {scalp_signal.signal_type} "
+                                f"trigger={scalp_signal.trigger}, "
+                                f"velocity={scalp_signal.velocity_pct:.2f}%, "
+                                f"conf={scalp_signal.confidence}"
+                            )
+
+                            # Broadcast scalp signal to frontend
+                            await connection_manager.broadcast({
+                                "type": "scalp_signal",
+                                "data": scalp_signal.to_dict(),
+                                "timestamp": now.isoformat(),
+                            })
+
+                    except Exception as e:
+                        logger.debug(f"[SCALP] Error evaluating {symbol}: {e}")
+
                 # Fetch options indicators (P/C Ratio, Max Pain) for this symbol
                 options_ind = await get_options_indicators(symbol)
 
@@ -1113,6 +1191,50 @@ async def lifespan(app: FastAPI):
         )
     except Exception as e:
         logger.warning(f"Could not initialize regime strategy: {e}")
+
+    # Initialize scalping module if enabled
+    global scalp_velocity_trackers, scalp_volume_analyzer, scalp_technical_scalpers
+    global scalp_signal_generators, scalp_config, SCALPING_ENABLED
+
+    try:
+        if config.scalping.enabled:
+            SCALPING_ENABLED = True
+            scalp_config = ScalpConfig(
+                enabled=True,
+                # Use sensible defaults - can be overridden via env vars later
+                momentum_threshold_pct=0.5,
+                volume_spike_ratio=1.5,
+                take_profit_pct=30.0,
+                stop_loss_pct=15.0,
+                max_hold_minutes=15,
+                max_daily_scalps=10,
+            )
+            scalp_volume_analyzer = VolumeAnalyzer()
+
+            # Initialize per-symbol components for enabled symbols (TSLA for now)
+            scalping_symbols = ["TSLA"]  # Start with validated symbol only
+            for symbol in scalping_symbols:
+                scalp_velocity_trackers[symbol] = PriceVelocityTracker(symbol)
+                scalp_technical_scalpers[symbol] = TechnicalScalper(symbol)
+                scalp_signal_generators[symbol] = ScalpSignalGenerator(
+                    symbol=symbol,
+                    config=scalp_config,
+                    velocity_tracker=scalp_velocity_trackers[symbol],
+                    volume_analyzer=scalp_volume_analyzer,
+                    technical_scalper=scalp_technical_scalpers[symbol],
+                )
+
+            logger.info("=" * 60)
+            logger.info("SCALPING MODULE ENABLED")
+            logger.info(f"  Symbols: {scalping_symbols}")
+            logger.info(f"  Momentum threshold: {scalp_config.momentum_threshold_pct}%")
+            logger.info(f"  Take profit: {scalp_config.take_profit_pct}%")
+            logger.info(f"  Stop loss: {scalp_config.stop_loss_pct}%")
+            logger.info(f"  Max hold: {scalp_config.max_hold_minutes} minutes")
+            logger.info("=" * 60)
+    except Exception as e:
+        logger.warning(f"Could not initialize scalping module: {e}")
+        SCALPING_ENABLED = False
 
     # Check for mock mode
     if MOCK_MODE:
