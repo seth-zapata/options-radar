@@ -3,8 +3,11 @@
  * Shows scalp signals, active positions, and closed trades.
  */
 
+import { useEffect } from 'react';
 import { useOptionsStore } from '../store/optionsStore';
 import type { ScalpSignal, ScalpPosition, ScalpExitResult, ScalpSignalType } from '../types';
+
+const API_BASE = 'http://localhost:8000';
 
 // Signal type badge colors
 const signalBadgeColors: Record<ScalpSignalType, { bg: string; text: string }> = {
@@ -236,9 +239,28 @@ function ClosedTradeRow({ trade }: ClosedTradeRowProps) {
 
 export function ScalpingPanel() {
   const scalpEnabled = useOptionsStore((state) => state.scalpEnabled);
+  const setScalpEnabled = useOptionsStore((state) => state.setScalpEnabled);
   const scalpSignals = useOptionsStore((state) => state.scalpSignals);
   const scalpPositions = useOptionsStore((state) => state.scalpPositions);
   const scalpClosedTrades = useOptionsStore((state) => state.scalpClosedTrades);
+
+  // Fetch scalping status from backend on mount
+  useEffect(() => {
+    const fetchScalpingStatus = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/api/trading/status`);
+        if (response.ok) {
+          const data = await response.json();
+          if (data.scalping_enabled !== undefined) {
+            setScalpEnabled(data.scalping_enabled);
+          }
+        }
+      } catch {
+        // Ignore fetch errors
+      }
+    };
+    fetchScalpingStatus();
+  }, [setScalpEnabled]);
 
   // Calculate session stats
   const totalTrades = scalpClosedTrades.length;
