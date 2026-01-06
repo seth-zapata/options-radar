@@ -7,15 +7,15 @@ Key distinction from regime system:
 - Regime: Multi-day sentiment signals, 7-30 DTE, ~1 trade/week
 - Scalping: Intraday momentum signals, 0-1 DTE, multiple trades/day
 
-Phase 1 (DataBento Integration):
+Phase 1 (DataBento Integration): COMPLETE
 - DataBentoLoader: Load historical CBBO-1m data
 - QuoteReplaySystem: Replay quotes for backtesting
 - ScalpConfig: Configuration dataclass
 
-Phase 2 (Core Components) - TODO:
-- PriceVelocityTracker: Track price velocity
-- VolumeAnalyzer: Detect volume spikes
-- TechnicalScalper: VWAP, S/R levels
+Phase 2 (Core Components): COMPLETE
+- PriceVelocityTracker: Track price velocity over multiple windows
+- VolumeAnalyzer: Detect volume spikes and put/call ratios
+- TechnicalScalper: VWAP with bands, S/R level detection
 
 Phase 3 (Signal Generation) - TODO:
 - ScalpSignalGenerator: Generate scalp signals
@@ -35,6 +35,23 @@ from backend.scalping.replay import (
     ReplayQuote,
     ReplayTick,
 )
+from backend.scalping.velocity_tracker import (
+    PricePoint,
+    PriceVelocityTracker,
+    SpikeSignal,
+    VelocityReading,
+)
+from backend.scalping.volume_analyzer import (
+    VolumeAnalyzer,
+    VolumeBar,
+    VolumeSpike,
+)
+from backend.scalping.technical_scalper import (
+    ScalpTechnicalSignal,
+    SupportResistance,
+    TechnicalScalper,
+    VWAPState,
+)
 
 __all__ = [
     # Config
@@ -48,4 +65,18 @@ __all__ = [
     "ReplayQuote",
     "ReplayTick",
     "BacktestClock",
+    # Velocity Tracker
+    "PriceVelocityTracker",
+    "VelocityReading",
+    "SpikeSignal",
+    "PricePoint",
+    # Volume Analyzer
+    "VolumeAnalyzer",
+    "VolumeBar",
+    "VolumeSpike",
+    # Technical Scalper
+    "TechnicalScalper",
+    "ScalpTechnicalSignal",
+    "SupportResistance",
+    "VWAPState",
 ]
