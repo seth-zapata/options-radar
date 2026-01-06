@@ -233,7 +233,7 @@ Examples:
         env["AUTO_EXECUTE"] = "false"
 
     if args.scalping:
-        env["SCALPING_ENABLED"] = "true"
+        env["SCALP_ENABLED"] = "true"
 
     env["SIMULATION_SPEED"] = str(args.speed)
 
