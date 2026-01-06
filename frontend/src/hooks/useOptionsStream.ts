@@ -4,7 +4,7 @@
 
 import { useEffect, useRef, useCallback } from 'react';
 import { useOptionsStore, EvaluatedOption } from '../store/optionsStore';
-import type { OptionData, UnderlyingData, WebSocketMessage, GateResult, AbstainData, Recommendation, SessionStatus, TrackedPosition, ExitSignal, RegimeStatus, RegimeSignal } from '../types';
+import type { UnderlyingData, WebSocketMessage, GateResult, AbstainData, Recommendation, SessionStatus, TrackedPosition, ExitSignal, RegimeStatus, RegimeSignal, ScalpSignal, ScalpPosition, ScalpExitResult } from '../types';
 
 const WS_URL = import.meta.env.PROD
   ? `wss://${window.location.host}/ws`
@@ -24,7 +24,8 @@ export function useOptionsStream() {
 
   // Get store methods and state
   const setConnectionStatus = useOptionsStore((state) => state.setConnectionStatus);
-  const updateOption = useOptionsStore((state) => state.updateOption);
+  // updateOption disabled - options data causes too many re-renders during market hours
+  // const updateOption = useOptionsStore((state) => state.updateOption);
   const updateUnderlying = useOptionsStore((state) => state.updateUnderlying);
   const setAbstain = useOptionsStore((state) => state.setAbstain);
   const setGateResults = useOptionsStore((state) => state.setGateResults);
@@ -37,6 +38,12 @@ export function useOptionsStream() {
   const setRegimeStatus = useOptionsStore((state) => state.setRegimeStatus);
   const addRegimeSignal = useOptionsStore((state) => state.addRegimeSignal);
   const activeSymbol = useOptionsStore((state) => state.activeSymbol);
+  // Scalping
+  const setScalpEnabled = useOptionsStore((state) => state.setScalpEnabled);
+  const addScalpSignal = useOptionsStore((state) => state.addScalpSignal);
+  const addScalpPosition = useOptionsStore((state) => state.addScalpPosition);
+  const updateScalpPosition = useOptionsStore((state) => state.updateScalpPosition);
+  const addScalpClosedTrade = useOptionsStore((state) => state.addScalpClosedTrade);
 
   // Send subscribe message to switch symbols
   const sendSubscribe = useCallback((symbol: string) => {
@@ -233,6 +240,31 @@ export function useOptionsStream() {
                 addRegimeSignal(message.data as RegimeSignal);
                 break;
 
+              // Scalping messages
+              case 'scalp_signal':
+                setScalpEnabled(true); // Mark scalping as enabled when we receive signals
+                addScalpSignal(message.data as ScalpSignal);
+                break;
+
+              case 'scalp_position_opened': {
+                setScalpEnabled(true);
+                const openedData = message.data as { position: ScalpPosition };
+                addScalpPosition(openedData.position);
+                break;
+              }
+
+              case 'scalp_position_closed': {
+                const closedData = message.data as ScalpExitResult;
+                addScalpClosedTrade(closedData);
+                break;
+              }
+
+              case 'scalp_position_update': {
+                const updateData = message.data as ScalpPosition;
+                updateScalpPosition(updateData);
+                break;
+              }
+
               default:
                 // Ignore unknown message types silently
                 break;
@@ -254,7 +286,7 @@ export function useOptionsStream() {
       cleanup();
       setConnectionStatus('disconnected');
     };
-  }, [setConnectionStatus, updateOption, updateUnderlying, setAbstain, setGateResults, addRecommendation, setSessionStatus, addPosition, updatePosition, addExitSignal, clearExitSignal, setRegimeStatus, addRegimeSignal]);
+  }, [setConnectionStatus, updateUnderlying, setAbstain, setGateResults, addRecommendation, setSessionStatus, addPosition, updatePosition, addExitSignal, clearExitSignal, setRegimeStatus, addRegimeSignal, setScalpEnabled, addScalpSignal, addScalpPosition, updateScalpPosition, addScalpClosedTrade]);
 
   // Handle symbol changes - send subscribe message to backend
   useEffect(() => {

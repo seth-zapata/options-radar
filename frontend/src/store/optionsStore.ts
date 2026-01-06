@@ -3,7 +3,7 @@
  */
 
 import { create } from 'zustand';
-import type { OptionData, UnderlyingData, AbstainData, ConnectionStatus, GateResult, Recommendation, SessionStatus, TrackedPosition, ExitSignal, HotPicks, RegimeStatus, RegimeSignal } from '../types';
+import type { OptionData, UnderlyingData, AbstainData, ConnectionStatus, GateResult, Recommendation, SessionStatus, TrackedPosition, ExitSignal, HotPicks, RegimeStatus, RegimeSignal, ScalpSignal, ScalpPosition, ScalpExitResult } from '../types';
 import { optionKey } from '../types';
 
 export interface EvaluatedOption {
@@ -107,6 +107,12 @@ interface OptionsState {
   regimeSignals: RegimeSignal[];
   regimeLoading: boolean;
 
+  // Scalping (0DTE/1DTE intraday momentum)
+  scalpEnabled: boolean;
+  scalpSignals: ScalpSignal[];
+  scalpPositions: ScalpPosition[];
+  scalpClosedTrades: ScalpExitResult[];  // Recent closed trades for P&L tracking
+
   // Actions
   setConnectionStatus: (status: ConnectionStatus) => void;
   updateOption: (option: OptionData) => void;
@@ -131,6 +137,14 @@ interface OptionsState {
   setRegimeStatus: (status: RegimeStatus) => void;
   addRegimeSignal: (signal: RegimeSignal) => void;
   setRegimeLoading: (loading: boolean) => void;
+  // Scalping actions
+  setScalpEnabled: (enabled: boolean) => void;
+  addScalpSignal: (signal: ScalpSignal) => void;
+  addScalpPosition: (position: ScalpPosition) => void;
+  updateScalpPosition: (position: ScalpPosition) => void;
+  removeScalpPosition: (signalId: string) => void;
+  addScalpClosedTrade: (trade: ScalpExitResult) => void;
+  clearScalpSignals: () => void;
   clearAll: () => void;
 }
 
@@ -165,6 +179,12 @@ export const useOptionsStore = create<OptionsState>((set) => ({
   regimeStatus: null,
   regimeSignals: [],
   regimeLoading: false,
+
+  // Scalping
+  scalpEnabled: false,
+  scalpSignals: [],
+  scalpPositions: [],
+  scalpClosedTrades: [],
 
   // Actions
   setConnectionStatus: (status) => set({ connectionStatus: status }),
@@ -326,6 +346,53 @@ export const useOptionsStore = create<OptionsState>((set) => ({
 
   setRegimeLoading: (loading) => set({ regimeLoading: loading }),
 
+  // Scalping actions
+  setScalpEnabled: (enabled) => set({ scalpEnabled: enabled }),
+
+  addScalpSignal: (signal) => set((state) => {
+    // Check if signal already exists
+    const exists = state.scalpSignals.some((s) => s.id === signal.id);
+    if (exists) return state;
+    // Keep last 20 signals
+    const newSignals = [signal, ...state.scalpSignals].slice(0, 20);
+    return { scalpSignals: newSignals };
+  }),
+
+  addScalpPosition: (position) => set((state) => {
+    // Check if position already exists
+    const exists = state.scalpPositions.some((p) => p.signal_id === position.signal_id);
+    if (exists) return state;
+    // Remove the corresponding signal (it's now a position)
+    const newSignals = state.scalpSignals.filter((s) => s.id !== position.signal_id);
+    return {
+      scalpPositions: [position, ...state.scalpPositions],
+      scalpSignals: newSignals,
+    };
+  }),
+
+  updateScalpPosition: (position) => set((state) => ({
+    scalpPositions: state.scalpPositions.map((p) =>
+      p.signal_id === position.signal_id ? position : p
+    ),
+  })),
+
+  removeScalpPosition: (signalId) => set((state) => ({
+    scalpPositions: state.scalpPositions.filter((p) => p.signal_id !== signalId),
+  })),
+
+  addScalpClosedTrade: (trade) => set((state) => {
+    // Remove the position
+    const newPositions = state.scalpPositions.filter((p) => p.signal_id !== trade.signal_id);
+    // Keep last 50 closed trades
+    const newClosedTrades = [trade, ...state.scalpClosedTrades].slice(0, 50);
+    return {
+      scalpPositions: newPositions,
+      scalpClosedTrades: newClosedTrades,
+    };
+  }),
+
+  clearScalpSignals: () => set({ scalpSignals: [] }),
+
   clearAll: () => set({
     options: new Map(),
     underlying: null,
@@ -336,6 +403,9 @@ export const useOptionsStore = create<OptionsState>((set) => ({
     sessionStatus: null,
     positions: [],
     exitSignals: [],
+    scalpSignals: [],
+    scalpPositions: [],
+    scalpClosedTrades: [],
   }),
 }));
 

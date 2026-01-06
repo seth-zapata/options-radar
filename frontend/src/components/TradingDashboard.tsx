@@ -9,6 +9,7 @@ import type { RegimeStatus, RegimeSignal, RegimeType, TrackedPosition, ExitSigna
 // ChainView disabled - too much overhead during market hours
 // import { ChainView } from './ChainView';
 import { TradingControlPanel } from './TradingControlPanel';
+import { ScalpingPanel } from './ScalpingPanel';
 
 const API_BASE = 'http://localhost:8000';
 
@@ -793,6 +794,15 @@ export function TradingDashboard() {
             Backtested: 71 trades, 43.7% win rate, +1238% return (Jan 2024 - Jan 2025)
           </div>
         </div>
+      </div>
+
+      {/* Scalping Panel - 0DTE/1DTE intraday momentum trading */}
+      <div className="bg-white rounded-lg shadow">
+        <div className="px-4 py-3 bg-purple-600 text-white rounded-t-lg">
+          <h3 className="font-bold">Scalping (0DTE/1DTE)</h3>
+          <p className="text-sm text-purple-200">Intraday momentum signals - VWAP, breakouts, velocity</p>
+        </div>
+        <ScalpingPanel />
       </div>
 
       {/* Trade History Section */}

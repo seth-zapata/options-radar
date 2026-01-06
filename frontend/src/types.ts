@@ -316,8 +316,88 @@ export interface AlpacaOrder {
   submitted_at: string;
 }
 
+// Scalping types (0DTE/1DTE intraday momentum)
+export type ScalpSignalType = 'SCALP_CALL' | 'SCALP_PUT';
+export type ScalpTrigger = 'momentum_burst' | 'vwap_bounce' | 'vwap_rejection' | 'breakout';
+export type ScalpExitReason = 'take_profit' | 'stop_loss' | 'time_exit';
+
+export interface ScalpSignal {
+  id: string;
+  timestamp: string;
+  symbol: string;
+  signal_type: ScalpSignalType;
+  trigger: ScalpTrigger;
+  underlying_price: number;
+  velocity_pct: number;
+  volume_ratio: number;
+  option_symbol: string;
+  strike: number;
+  expiry: string;
+  delta: number;
+  dte: number;
+  bid_price: number;
+  ask_price: number;
+  entry_price: number;
+  spread_pct: number;
+  take_profit_pct: number;
+  stop_loss_pct: number;
+  max_hold_minutes: number;
+  confidence: number;
+  suggested_contracts: number;
+}
+
+export interface ScalpPosition {
+  signal_id: string;
+  symbol: string;
+  signal_type: ScalpSignalType;
+  trigger: string;
+  confidence: number;
+  option_symbol: string;
+  strike: number;
+  expiry: string;
+  delta: number;
+  dte: number;
+  entry_time: string;
+  entry_price: number;
+  underlying_at_entry: number;
+  contracts: number;
+  take_profit_pct: number;
+  stop_loss_pct: number;
+  max_hold_seconds: number;
+  current_price: number | null;
+  current_pnl_pct: number;
+  hold_seconds: number;
+  max_gain_pct: number;
+  max_drawdown_pct: number;
+}
+
+export interface ScalpExecutionResult {
+  success: boolean;
+  signal: ScalpSignal;
+  position: ScalpPosition | null;
+  order_id: string | null;
+  error: string | null;
+  fill_price: number | null;
+}
+
+export interface ScalpExitResult {
+  signal_id: string;
+  symbol: string;
+  signal_type: ScalpSignalType;
+  option_symbol: string;
+  exit_reason: ScalpExitReason;
+  entry_price: number;
+  exit_price: number;
+  pnl_dollars: number;
+  pnl_pct: number;
+  hold_seconds: number;
+  max_gain_pct: number;
+  max_drawdown_pct: number;
+  order_id: string | null;
+}
+
 export interface WebSocketMessage {
-  type: 'option_update' | 'underlying_update' | 'gate_status' | 'abstain' | 'connection_status' | 'error' | 'ping' | 'recommendation' | 'session_status' | 'position_opened' | 'position_closed' | 'position_updated' | 'exit_signal' | 'symbol_changed' | 'regime_signal' | 'regime_status';
+  type: 'option_update' | 'underlying_update' | 'gate_status' | 'abstain' | 'connection_status' | 'error' | 'ping' | 'recommendation' | 'session_status' | 'position_opened' | 'position_closed' | 'position_updated' | 'exit_signal' | 'symbol_changed' | 'regime_signal' | 'regime_status' | 'scalp_signal' | 'scalp_position_opened' | 'scalp_position_closed' | 'scalp_position_update';
   data?: unknown;
   timestamp?: string;
 }
