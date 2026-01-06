@@ -17,9 +17,12 @@ Phase 2 (Core Components): COMPLETE
 - VolumeAnalyzer: Detect volume spikes and put/call ratios
 - TechnicalScalper: VWAP with bands, S/R level detection
 
-Phase 3 (Signal Generation) - TODO:
-- ScalpSignalGenerator: Generate scalp signals
-- ScalpBacktester: Backtest scalping strategy
+Phase 3 (Signal Generation): COMPLETE
+- ScalpSignal: Complete scalping trade signal
+- ScalpSignalGenerator: Generate scalp signals from components
+- ScalpTrade: Completed trade record with P&L
+- BacktestResult: Aggregate backtest statistics
+- ScalpBacktester: Backtest scalping strategy on historical data
 """
 
 from backend.scalping.config import (
@@ -52,6 +55,15 @@ from backend.scalping.technical_scalper import (
     TechnicalScalper,
     VWAPState,
 )
+from backend.scalping.signal_generator import (
+    ScalpSignal,
+    ScalpSignalGenerator,
+)
+from backend.scalping.scalp_backtester import (
+    BacktestResult,
+    ScalpBacktester,
+    ScalpTrade,
+)
 
 __all__ = [
     # Config
@@ -79,4 +91,11 @@ __all__ = [
     "ScalpTechnicalSignal",
     "SupportResistance",
     "VWAPState",
+    # Signal Generator
+    "ScalpSignal",
+    "ScalpSignalGenerator",
+    # Backtester
+    "ScalpTrade",
+    "BacktestResult",
+    "ScalpBacktester",
 ]
