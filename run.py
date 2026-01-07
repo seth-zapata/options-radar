@@ -73,22 +73,46 @@ def run_backtest(args):
     from backend.scalping.volume_analyzer import VolumeAnalyzer
     from backend.scalping.technical_scalper import TechnicalScalper
     from backend.scalping.scalp_backtester import ScalpBacktester
+    from backend.data.databento_loader import DataBentoLoader
 
     # Parse dates
-    start_date = datetime.fromisoformat(args.start) if args.start else None
-    end_date = datetime.fromisoformat(args.end) if args.end else None
+    start_date = datetime.fromisoformat(args.start).date() if args.start else None
+    end_date = datetime.fromisoformat(args.end).date() if args.end else None
 
-    # Setup
-    config = ScalpConfig(enabled=True)
-    replay = QuoteReplaySystem()
-
+    # Setup loader and replay system
     data_path = Path(args.backtest)
     print(f"Loading data from {data_path}...")
-    replay.load_data(data_path, start_date, end_date)
-    print(f"Loaded {replay.quote_count} quotes")
 
-    if replay.quote_count == 0:
-        print("No data loaded. Check the data path and date range.")
+    loader = DataBentoLoader(data_path)
+    available_dates = loader.get_available_dates()
+    print(f"Found {len(available_dates)} trading days ({available_dates[0]} to {available_dates[-1]})")
+
+    # Filter to requested date range
+    if start_date:
+        available_dates = [d for d in available_dates if d >= start_date]
+    if end_date:
+        available_dates = [d for d in available_dates if d <= end_date]
+    print(f"Backtest range: {len(available_dates)} days")
+
+    # Use relaxed config for backtesting (TSLA 0DTE options are expensive)
+    config = ScalpConfig(
+        enabled=True,
+        # Relaxed for backtesting
+        max_contract_price=20.0,  # TSLA 0DTE options often $5-20
+        delta_tolerance=0.25,  # Accept wider delta range (0.10-0.60)
+        target_delta=0.40,  # Slightly higher target for TSLA
+        max_spread_pct=10.0,  # Allow wider spreads in backtest
+        # Keep other defaults
+        momentum_threshold_pct=0.5,
+        momentum_window_seconds=30,
+        take_profit_pct=30.0,
+        stop_loss_pct=15.0,
+        max_hold_minutes=15,
+    )
+    replay = QuoteReplaySystem(loader)
+
+    if len(available_dates) == 0:
+        print("No data in requested date range.")
         sys.exit(1)
 
     # Create components
@@ -107,7 +131,10 @@ def run_backtest(args):
     # Run backtest
     print("Running backtest...")
     backtester = ScalpBacktester(config, replay, generator)
-    result = backtester.run(start_date, end_date)
+    # Use first/last available dates if not specified
+    bt_start = start_date or available_dates[0]
+    bt_end = end_date or available_dates[-1]
+    result = backtester.run(bt_start, bt_end)
 
     # Print summary
     print()

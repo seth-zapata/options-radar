@@ -80,6 +80,23 @@ class ReplayTick:
         return [q for q in self.quotes if q.right == "P"]
 
 
+@dataclass
+class BacktestTick:
+    """Simple tick format for backtester compatibility.
+
+    The backtester expects individual ticks rather than grouped ReplayTick.
+    This provides a flat structure for each price update.
+    """
+
+    timestamp: datetime
+    symbol: str  # OCC symbol or underlying symbol
+    is_underlying: bool
+    mid_price: float
+    bid_price: float
+    ask_price: float
+    volume: int | None = None
+
+
 class QuoteReplaySystem:
     """Replays historical quotes for backtesting.
 
@@ -181,6 +198,50 @@ class QuoteReplaySystem:
             if on_day_end:
                 on_day_end(current_date, tick_count)
 
+    def replay(
+        self,
+        start_date: date,
+        end_date: date,
+        symbol_filter: str | None = "TSLA",
+    ) -> Iterator[BacktestTick]:
+        """Replay quotes as flat BacktestTick objects for backtester.
+
+        This method converts ReplayTick (grouped by timestamp) into
+        individual BacktestTick objects that the backtester expects.
+
+        Args:
+            start_date: First date (inclusive)
+            end_date: Last date (inclusive)
+            symbol_filter: Only include options for this underlying
+
+        Yields:
+            BacktestTick for each quote (underlying first, then options)
+        """
+        for tick in self.replay_range(start_date, end_date, symbol_filter):
+            # First yield underlying price update if available
+            if tick.underlying_price is not None:
+                yield BacktestTick(
+                    timestamp=tick.timestamp,
+                    symbol=symbol_filter or "UND",
+                    is_underlying=True,
+                    mid_price=tick.underlying_price,
+                    bid_price=tick.underlying_price,
+                    ask_price=tick.underlying_price,
+                    volume=None,
+                )
+
+            # Then yield each option quote
+            for quote in tick.quotes:
+                yield BacktestTick(
+                    timestamp=tick.timestamp,
+                    symbol=quote.symbol,
+                    is_underlying=False,
+                    mid_price=quote.mid,
+                    bid_price=quote.bid,
+                    ask_price=quote.ask,
+                    volume=None,
+                )
+
     def _process_dataframe(
         self,
         df: pd.DataFrame,
@@ -273,10 +334,13 @@ class QuoteReplaySystem:
             )
 
     def _estimate_underlying_price(self, quotes: list[ReplayQuote]) -> float | None:
-        """Estimate underlying price from option quotes.
+        """Estimate underlying price from option quotes using put-call parity.
 
-        Uses the tightest-spread ATM call as proxy for underlying.
-        For TSLA, strike ≈ underlying for ATM options.
+        For ATM options at strike K with call mid C and put mid P:
+        underlying ≈ K + (C - P)
+
+        This is more accurate than using strike alone because it captures
+        actual market expectations of underlying price.
 
         Args:
             quotes: List of quotes at this timestamp
@@ -284,17 +348,30 @@ class QuoteReplaySystem:
         Returns:
             Estimated underlying price or None
         """
-        # Filter to calls with tight spreads
-        calls = [q for q in quotes if q.right == "C" and q.spread > 0]
+        # Filter to valid quotes with tight spreads
+        calls = [q for q in quotes if q.right == "C" and q.spread > 0 and q.spread_pct < 20]
+        puts = [q for q in quotes if q.right == "P" and q.spread > 0 and q.spread_pct < 20]
+
         if not calls:
             return None
 
-        # Find call with tightest spread (likely most liquid/ATM)
-        best = min(calls, key=lambda q: q.spread_pct)
+        # Find tightest-spread call (likely most liquid/ATM)
+        best_call = min(calls, key=lambda q: q.spread_pct)
 
-        # For ATM calls, strike ≈ underlying
-        # This is approximate but sufficient for backtesting
-        return best.strike
+        # Try to find matching put at same strike
+        matching_put = next((p for p in puts if p.strike == best_call.strike), None)
+
+        if matching_put:
+            # Use put-call parity: underlying = strike + (call_mid - put_mid)
+            return best_call.strike + (best_call.mid - matching_put.mid)
+
+        # Fallback: estimate from call alone using delta approximation
+        # For ATM call (delta ~0.5), underlying ≈ strike + 2*(call_mid - (strike - underlying)/2)
+        # Simplified: just use strike + call_mid as rough estimate
+        # Since ATM call mid ~ underlying * delta, and delta ~ 0.5 for ATM
+        # This gives underlying ~ strike + 2 * call_mid * 0.05 (for ~5% of strike)
+        # But safer to just return strike + call_mid for now as directional proxy
+        return best_call.strike + best_call.mid * 0.5
 
     def get_day_summary(self, target_date: date) -> dict:
         """Get summary statistics for a day's data.

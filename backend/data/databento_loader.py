@@ -59,9 +59,19 @@ class DataBentoLoader:
             process(df)
     """
 
-    # Expected CBBO-1m columns
-    REQUIRED_COLUMNS = {"ts_recv", "ts_event", "symbol", "bid_px", "ask_px", "bid_sz", "ask_sz"}
+    # Expected CBBO-1m columns (DataBento uses _00 suffix for top of book)
+    REQUIRED_COLUMNS = {"ts_recv", "ts_event", "symbol"}
+    # These can be either with or without _00 suffix
+    PRICE_COLUMNS = {"bid_px", "ask_px", "bid_sz", "ask_sz"}
     OPTIONAL_COLUMNS = {"bid_ct", "ask_ct"}  # Order counts
+
+    # Column mapping for DataBento format (with _00 suffix)
+    COLUMN_REMAP = {
+        "bid_px_00": "bid_px",
+        "ask_px_00": "ask_px",
+        "bid_sz_00": "bid_sz",
+        "ask_sz_00": "ask_sz",
+    }
 
     def __init__(
         self,
@@ -120,13 +130,24 @@ class DataBentoLoader:
         # Check both compressed and uncompressed
         for pattern in ["*.csv.zst", "*.csv"]:
             for path in self.data_dir.glob(pattern):
-                # Extract date from filename (e.g., "2024-01-03.csv.zst")
+                # Extract date from filename
                 name = path.name.replace(".csv.zst", "").replace(".csv", "")
+
+                # Try DataBento format: opra-pillar-YYYYMMDD.cbbo-1m
+                if name.startswith("opra-pillar-") and ".cbbo-1m" in name:
+                    date_part = name.replace("opra-pillar-", "").replace(".cbbo-1m", "")
+                    try:
+                        d = datetime.strptime(date_part, "%Y%m%d").date()
+                        dates.add(d)
+                        continue
+                    except ValueError:
+                        pass
+
+                # Try standard formats: YYYY-MM-DD or YYYYMMDD
                 try:
                     d = datetime.strptime(name, "%Y-%m-%d").date()
                     dates.add(d)
                 except ValueError:
-                    # Try alternate format: YYYYMMDD
                     try:
                         d = datetime.strptime(name, "%Y%m%d").date()
                         dates.add(d)
@@ -148,24 +169,30 @@ class DataBentoLoader:
             FileNotFoundError: If no data file exists for the date
         """
         # Try multiple filename formats
-        date_formats = [
-            target_date.strftime("%Y-%m-%d"),
-            target_date.strftime("%Y%m%d"),
+        date_str_ymd = target_date.strftime("%Y-%m-%d")
+        date_str_compact = target_date.strftime("%Y%m%d")
+
+        # File patterns to try (in order of preference)
+        patterns = [
+            f"opra-pillar-{date_str_compact}.cbbo-1m.csv.zst",  # DataBento format
+            f"opra-pillar-{date_str_compact}.cbbo-1m.csv",
+            f"{date_str_ymd}.csv.zst",
+            f"{date_str_ymd}.csv",
+            f"{date_str_compact}.csv.zst",
+            f"{date_str_compact}.csv",
         ]
 
-        for date_str in date_formats:
-            # Try compressed first (more common)
-            zst_path = self.data_dir / f"{date_str}.csv.zst"
-            if zst_path.exists():
-                return self._load_zst(zst_path)
-
-            csv_path = self.data_dir / f"{date_str}.csv"
-            if csv_path.exists():
-                return self._load_csv(csv_path)
+        for pattern in patterns:
+            path = self.data_dir / pattern
+            if path.exists():
+                if path.suffix == ".zst" or str(path).endswith(".csv.zst"):
+                    return self._load_zst(path)
+                else:
+                    return self._load_csv(path)
 
         raise FileNotFoundError(
             f"No data file for {target_date}. "
-            f"Checked: {date_formats[0]}.csv.zst, {date_formats[0]}.csv"
+            f"Checked patterns: {patterns[:2]}"
         )
 
     def _load_zst(self, path: Path) -> pd.DataFrame:
@@ -190,6 +217,7 @@ class DataBentoLoader:
                     parse_dates=["ts_event", "ts_recv"],
                 )
 
+        df = self._remap_columns(df)
         self._validate_columns(df, path)
         logger.info(f"Loaded {len(df):,} rows from {path.name}")
         return df
@@ -203,16 +231,39 @@ class DataBentoLoader:
             parse_dates=["ts_event", "ts_recv"],
         )
 
+        df = self._remap_columns(df)
         self._validate_columns(df, path)
         logger.info(f"Loaded {len(df):,} rows from {path.name}")
         return df
 
+    def _remap_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Remap DataBento column names to standard names.
+
+        DataBento uses _00 suffix for top of book (e.g., bid_px_00).
+        We remap these to simpler names (bid_px).
+        """
+        # Only remap columns that exist
+        rename_map = {k: v for k, v in self.COLUMN_REMAP.items() if k in df.columns}
+        if rename_map:
+            df = df.rename(columns=rename_map)
+            logger.debug(f"Remapped columns: {list(rename_map.keys())}")
+        return df
+
     def _validate_columns(self, df: pd.DataFrame, path: Path) -> None:
         """Validate that DataFrame has required columns."""
+        # Check base required columns
         missing = self.REQUIRED_COLUMNS - set(df.columns)
         if missing:
             raise ValueError(
                 f"Missing required columns in {path.name}: {missing}. "
+                f"Found columns: {list(df.columns)}"
+            )
+
+        # Check price columns (after remapping)
+        missing_price = self.PRICE_COLUMNS - set(df.columns)
+        if missing_price:
+            raise ValueError(
+                f"Missing price columns in {path.name}: {missing_price}. "
                 f"Found columns: {list(df.columns)}"
             )
 

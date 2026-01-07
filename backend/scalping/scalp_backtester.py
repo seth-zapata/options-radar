@@ -171,11 +171,14 @@ class BacktestResult:
 
     def summary(self) -> str:
         """Generate text summary of results."""
+        # Handle both date and datetime objects
+        start_str = self.start_date.isoformat() if hasattr(self.start_date, 'isoformat') else str(self.start_date)
+        end_str = self.end_date.isoformat() if hasattr(self.end_date, 'isoformat') else str(self.end_date)
         lines = [
             f"{'=' * 60}",
             f"SCALP BACKTEST RESULTS",
             f"{'=' * 60}",
-            f"Period: {self.start_date.date()} to {self.end_date.date()}",
+            f"Period: {start_str} to {end_str}",
             f"Trading Days: {self.trading_days}",
             "",
             f"{'PERFORMANCE':=^60}",
@@ -213,9 +216,11 @@ class BacktestResult:
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
+        start_str = self.start_date.isoformat() if hasattr(self.start_date, 'isoformat') else str(self.start_date)
+        end_str = self.end_date.isoformat() if hasattr(self.end_date, 'isoformat') else str(self.end_date)
         return {
-            "start_date": self.start_date.isoformat(),
-            "end_date": self.end_date.isoformat(),
+            "start_date": start_str,
+            "end_date": end_str,
             "trading_days": self.trading_days,
             "total_trades": self.total_trades,
             "winners": self.winners,
