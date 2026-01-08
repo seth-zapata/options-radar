@@ -384,12 +384,13 @@ class ScalpSignalGenerator:
     ) -> dict | None:
         """Select best option for the scalp trade.
 
-        Criteria:
+        Criteria (updated based on backtest analysis):
         - Correct type (C/P)
-        - 0DTE or 1DTE (max_dte)
-        - Delta near target (0.35 ± tolerance)
+        - DTE between min_dte and max_dte (SKIP 0DTE - 3.5% win rate)
+        - Prefer target_dte (DTE=2 showed 66.7% win rate)
+        - Delta near target (0.40 ± 0.15)
         - Spread under threshold
-        - Price under max
+        - Price under max ($3 - cheap options win more)
 
         Args:
             underlying_price: Current stock price
@@ -405,8 +406,10 @@ class ScalpSignalGenerator:
             if opt.get("option_type") != option_type:
                 continue
 
-            # Filter by DTE
+            # Filter by DTE - HARD FILTER: skip 0DTE (min_dte=1)
             dte = opt.get("dte", 99)
+            if dte < self.config.min_dte:
+                continue  # Skip 0DTE - backtest showed 3.5% win rate
             if dte > self.config.max_dte:
                 continue
 
@@ -426,16 +429,23 @@ class ScalpSignalGenerator:
             if spread_pct > self.config.max_spread_pct:
                 continue
 
-            # Filter by price
+            # Filter by price - prefer cheap options (backtest showed $2.86 avg winner)
             if ask > self.config.max_contract_price:
                 continue
 
             # Score candidate
             score = 0.0
 
-            # Prefer 0DTE
-            if self.config.prefer_0dte and dte == 0:
-                score += 10
+            # STRONG preference for target_dte (DTE=2 showed 66.7% win rate)
+            if dte == self.config.target_dte:
+                score += 20  # Strong bonus for target DTE
+            elif dte == self.config.target_dte - 1 or dte == self.config.target_dte + 1:
+                score += 10  # Moderate bonus for adjacent DTEs
+
+            # Prefer cheaper options (backtest showed cheap options win more)
+            # Max bonus of 10 for $0.50 options, decreasing to 0 for $3 options
+            price_score = max(0, (self.config.max_contract_price - ask) / self.config.max_contract_price * 10)
+            score += price_score
 
             # Prefer tighter spreads
             score += self.config.max_spread_pct - spread_pct
@@ -443,7 +453,7 @@ class ScalpSignalGenerator:
             # Prefer delta closer to target
             score += (
                 self.config.delta_tolerance - abs(delta - self.config.target_delta)
-            ) * 10
+            ) * 5
 
             candidates.append((score, opt))
 

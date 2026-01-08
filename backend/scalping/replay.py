@@ -16,6 +16,7 @@ import pandas as pd
 
 from backend.data.databento_loader import DataBentoLoader
 from backend.models.canonical import CanonicalOptionId, parse_occ
+from backend.scalping.bar_cache import BarCache, CachedBar, SecondBarCache
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,8 @@ class QuoteReplaySystem:
         max_dte: int = 1,
         min_bid: float = 0.05,
         max_spread_pct: float = 10.0,
+        bar_cache: BarCache | None = None,
+        second_bar_cache: SecondBarCache | None = None,
     ):
         """Initialize replay system.
 
@@ -136,12 +139,18 @@ class QuoteReplaySystem:
             max_dte: Maximum DTE to include (0 = 0DTE only, 1 = include 1DTE)
             min_bid: Minimum bid price filter
             max_spread_pct: Maximum spread as percentage of mid
+            bar_cache: Optional BarCache for 1-minute underlying prices (fallback)
+            second_bar_cache: Optional SecondBarCache for 1-second underlying prices (preferred)
         """
         self.loader = loader
         self.filter_market_hours = filter_market_hours
         self.max_dte = max_dte
         self.min_bid = min_bid
         self.max_spread_pct = max_spread_pct
+        self.bar_cache = bar_cache
+        self.second_bar_cache = second_bar_cache
+        self._bars_in_memory: dict[datetime, CachedBar] | None = None
+        self._second_bars_in_memory: dict[datetime, CachedBar] | None = None
 
     def replay_day(
         self,
@@ -166,6 +175,29 @@ class QuoteReplaySystem:
         # Filter and process
         yield from self._process_dataframe(df, target_date, symbol_filter)
 
+    def load_bars_for_range(self, symbol: str, start_date: date, end_date: date) -> None:
+        """Pre-load bar cache into memory for a date range.
+
+        Call this before replay_range for better performance.
+        Prefers 1-second bars when available, falls back to 1-minute bars.
+
+        Args:
+            symbol: Stock symbol (e.g., "TSLA")
+            start_date: Start date
+            end_date: End date
+        """
+        # Try loading 1-second bars first (preferred - more accurate)
+        if self.second_bar_cache:
+            self._second_bars_in_memory = self.second_bar_cache.load_range_to_memory(
+                symbol, start_date, end_date
+            )
+
+        # Also load 1-minute bars as fallback
+        if self.bar_cache:
+            self._bars_in_memory = self.bar_cache.load_range_to_memory(
+                symbol, start_date, end_date
+            )
+
     def replay_range(
         self,
         start_date: date,
@@ -186,6 +218,10 @@ class QuoteReplaySystem:
         Yields:
             ReplayTick for each unique timestamp across all days
         """
+        # Load bars into memory if we have a cache and haven't loaded yet
+        if self.bar_cache and symbol_filter and self._bars_in_memory is None:
+            self.load_bars_for_range(symbol_filter, start_date, end_date)
+
         for current_date, df in self.loader.load_date_range(start_date, end_date):
             if on_day_start:
                 on_day_start(current_date)
@@ -203,6 +239,8 @@ class QuoteReplaySystem:
         start_date: date,
         end_date: date,
         symbol_filter: str | None = "TSLA",
+        on_day_start: Callable[[date], None] | None = None,
+        on_day_end: Callable[[date, int], None] | None = None,
     ) -> Iterator[BacktestTick]:
         """Replay quotes as flat BacktestTick objects for backtester.
 
@@ -213,11 +251,13 @@ class QuoteReplaySystem:
             start_date: First date (inclusive)
             end_date: Last date (inclusive)
             symbol_filter: Only include options for this underlying
+            on_day_start: Callback at start of each day
+            on_day_end: Callback at end of each day with tick count
 
         Yields:
             BacktestTick for each quote (underlying first, then options)
         """
-        for tick in self.replay_range(start_date, end_date, symbol_filter):
+        for tick in self.replay_range(start_date, end_date, symbol_filter, on_day_start, on_day_end):
             # First yield underlying price update if available
             if tick.underlying_price is not None:
                 yield BacktestTick(
@@ -324,14 +364,135 @@ class QuoteReplaySystem:
                 )
                 quotes.append(quote)
 
-            # Estimate underlying price from ATM options
-            underlying_price = self._estimate_underlying_price(quotes)
+            # Get underlying price - prefer real bars over estimation
+            underlying_price = self._get_underlying_price(ts, quotes)
 
             yield ReplayTick(
                 timestamp=ts,
                 underlying_price=underlying_price,
                 quotes=quotes,
             )
+
+    def _get_underlying_price(
+        self, timestamp: datetime, quotes: list[ReplayQuote]
+    ) -> float | None:
+        """Get underlying price from bar cache or estimate from options.
+
+        Prefers real bar data when available, falls back to put-call parity estimation.
+
+        Args:
+            timestamp: Time to look up
+            quotes: Quotes at this timestamp (for fallback estimation)
+
+        Returns:
+            Underlying price or None
+        """
+        # Try bar cache first (real prices)
+        if self._bars_in_memory:
+            price = self._lookup_bar_price(timestamp)
+            if price is not None:
+                return price
+
+        # Fallback to estimation from options
+        return self._estimate_underlying_price(quotes)
+
+    def _lookup_bar_price(self, timestamp: datetime) -> float | None:
+        """Look up price from loaded bar cache.
+
+        IMPORTANT: To avoid lookahead bias, we use the PREVIOUS bar's close.
+        A bar's close price isn't known until the end of that bar, so:
+        - For 1-second bars: At 14:33:15, use 14:33:14 bar close (1 second delay)
+        - For 1-minute bars: At 14:33:15, use 14:32 bar close (up to 75 second delay)
+
+        Prefers 1-second bars when available for more accurate momentum detection.
+
+        Args:
+            timestamp: Time to look up
+
+        Returns:
+            Close price of the PREVIOUS completed bar, or None if not found
+        """
+        # Try 1-second bars first (preferred - only 1 second delay)
+        if self._second_bars_in_memory:
+            price = self._lookup_second_bar_price(timestamp)
+            if price is not None:
+                return price
+
+        # Fall back to 1-minute bars
+        if self._bars_in_memory:
+            return self._lookup_minute_bar_price(timestamp)
+
+        return None
+
+    def _lookup_second_bar_price(self, timestamp: datetime) -> float | None:
+        """Look up price from 1-second bars.
+
+        Uses the PREVIOUS second's bar close to avoid lookahead bias.
+        At 14:33:15.500, we use the 14:33:14 bar close (last completed second).
+
+        Args:
+            timestamp: Time to look up
+
+        Returns:
+            Close price or None if not found
+        """
+        if not self._second_bars_in_memory:
+            return None
+
+        # Use the PREVIOUS second's bar to avoid lookahead bias
+        prev_second = timestamp.replace(microsecond=0) - timedelta(seconds=1)
+
+        if prev_second in self._second_bars_in_memory:
+            return self._second_bars_in_memory[prev_second].close
+
+        # Fallback: find nearest EARLIER bar within 5 seconds
+        best_bar = None
+        best_diff = timedelta(seconds=5)
+
+        for ts, bar in self._second_bars_in_memory.items():
+            if ts >= timestamp:
+                continue
+            diff = timestamp - ts
+            if diff < best_diff:
+                best_diff = diff
+                best_bar = bar
+
+        return best_bar.close if best_bar else None
+
+    def _lookup_minute_bar_price(self, timestamp: datetime) -> float | None:
+        """Look up price from 1-minute bars.
+
+        Uses the PREVIOUS minute's bar close to avoid lookahead bias.
+        At 14:33:15, we use the 14:32 bar close (last known price).
+
+        Args:
+            timestamp: Time to look up
+
+        Returns:
+            Close price or None if not found
+        """
+        if not self._bars_in_memory:
+            return None
+
+        # Use the PREVIOUS minute's bar to avoid lookahead bias
+        prev_minute = (timestamp.replace(second=0, microsecond=0) - timedelta(minutes=1))
+
+        if prev_minute in self._bars_in_memory:
+            return self._bars_in_memory[prev_minute].close
+
+        # Fallback: find nearest EARLIER bar within 5 minutes
+        best_bar = None
+        best_diff = timedelta(minutes=5)
+
+        for ts, bar in self._bars_in_memory.items():
+            if ts >= timestamp:
+                continue
+            diff = timestamp - ts
+            if diff < best_diff:
+                best_diff = diff
+                best_bar = bar
+
+        return best_bar.close if best_bar else None
 
     def _estimate_underlying_price(self, quotes: list[ReplayQuote]) -> float | None:
         """Estimate underlying price from option quotes using put-call parity.

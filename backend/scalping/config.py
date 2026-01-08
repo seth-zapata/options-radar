@@ -42,23 +42,24 @@ class ScalpConfig:
         volume_spike_ratio: Required volume vs baseline (1.5x)
 
         Option Selection:
-        target_delta: Ideal delta for entries (0.35)
-        delta_tolerance: Accept this range around target (±0.10)
-        max_spread_pct: Max bid-ask spread as % of mid (8%)
+        target_delta: Ideal delta for entries (0.40)
+        delta_tolerance: Accept this range around target (±0.15)
+        max_spread_pct: Max bid-ask spread as % of mid (10%)
         min_open_interest: Minimum OI required (100)
-        max_dte: Maximum days to expiry (1 = 0DTE + 1DTE)
-        prefer_0dte: Prefer same-day expiry when available
+        min_dte: Minimum days to expiry - SKIP 0DTE (default 1)
+        target_dte: Preferred DTE for entries (default 2)
+        max_dte: Maximum days to expiry (default 3)
 
         Risk Management:
-        take_profit_pct: Exit at this profit (30%)
+        take_profit_pct: Exit at this profit (20%)
         stop_loss_pct: Exit at this loss (15%)
-        max_hold_minutes: Force exit after this time (15 min)
+        max_hold_minutes: Force exit after this time (None = no limit, allow overnight)
 
         Position Limits:
         max_daily_scalps: Max trades per day (10)
         max_concurrent_scalps: Max open at once (1)
         scalp_position_size_pct: % of portfolio per trade (5%)
-        max_contract_price: Don't buy options over this ($5)
+        max_contract_price: Don't buy options over this ($3)
 
         Cooldowns:
         min_signal_interval_seconds: Min time between signals (60s)
@@ -79,24 +80,25 @@ class ScalpConfig:
     # Volume thresholds
     volume_spike_ratio: float = 1.5  # 1.5x normal volume required
 
-    # Option selection
-    target_delta: float = 0.35
-    delta_tolerance: float = 0.10  # Accept 0.25-0.45 delta
-    max_spread_pct: float = 8.0  # Max 8% spread
+    # Option selection - Updated based on backtest analysis
+    target_delta: float = 0.40
+    delta_tolerance: float = 0.15  # Accept 0.25-0.55 delta
+    max_spread_pct: float = 10.0  # Max 10% spread
     min_open_interest: int = 100  # Minimum OI
-    max_dte: int = 1  # 0DTE or 1DTE only
-    prefer_0dte: bool = True
+    min_dte: int = 1  # SKIP 0DTE - backtest showed 3.5% win rate
+    target_dte: int = 2  # Prefer DTE=2 - backtest showed 66.7% win rate
+    max_dte: int = 3  # Allow up to DTE=3
 
-    # Risk management
-    take_profit_pct: float = 30.0
+    # Risk management - Updated based on backtest analysis
+    take_profit_pct: float = 20.0  # Lowered from 30% to capture more winners
     stop_loss_pct: float = 15.0
-    max_hold_minutes: int = 15
+    max_hold_minutes: int | None = None  # None = no limit, allow overnight holds
 
-    # Position limits
+    # Position limits - Updated based on backtest analysis
     max_daily_scalps: int = 10
     max_concurrent_scalps: int = 1
     scalp_position_size_pct: float = 5.0  # % of portfolio
-    max_contract_price: float = 5.00  # Don't buy options > $5
+    max_contract_price: float = 3.00  # Lowered from $5 - cheap options win more
 
     # Cooldowns
     min_signal_interval_seconds: float = 60.0  # 1 min between signals
@@ -108,8 +110,13 @@ class ScalpConfig:
         return ScalpExitConfig(
             take_profit_pct=self.take_profit_pct,
             stop_loss_pct=self.stop_loss_pct,
-            max_hold_minutes=self.max_hold_minutes,
+            max_hold_minutes=self.max_hold_minutes if self.max_hold_minutes else 9999,
         )
+
+    @property
+    def allow_overnight(self) -> bool:
+        """Check if overnight holds are allowed."""
+        return self.max_hold_minutes is None
 
 
 def load_scalp_config_from_env() -> ScalpConfig:
@@ -121,19 +128,20 @@ def load_scalp_config_from_env() -> ScalpConfig:
         SCALP_MOMENTUM_THRESHOLD=0.5
         SCALP_MOMENTUM_WINDOW=30
         SCALP_VOLUME_SPIKE_RATIO=1.5
-        SCALP_TARGET_DELTA=0.35
-        SCALP_DELTA_TOLERANCE=0.10
-        SCALP_MAX_SPREAD_PCT=8.0
+        SCALP_TARGET_DELTA=0.40
+        SCALP_DELTA_TOLERANCE=0.15
+        SCALP_MAX_SPREAD_PCT=10.0
         SCALP_MIN_OI=100
-        SCALP_MAX_DTE=1
-        SCALP_PREFER_0DTE=true
-        SCALP_TAKE_PROFIT=30.0
+        SCALP_MIN_DTE=1
+        SCALP_TARGET_DTE=2
+        SCALP_MAX_DTE=3
+        SCALP_TAKE_PROFIT=20.0
         SCALP_STOP_LOSS=15.0
-        SCALP_MAX_HOLD_MINUTES=15
+        SCALP_MAX_HOLD_MINUTES=0  (0 = no limit, allow overnight)
         SCALP_MAX_DAILY=10
         SCALP_MAX_CONCURRENT=1
         SCALP_POSITION_SIZE=5.0
-        SCALP_MAX_CONTRACT_PRICE=5.0
+        SCALP_MAX_CONTRACT_PRICE=3.0
         SCALP_MIN_SIGNAL_INTERVAL=60.0
         SCALP_COOLDOWN_AFTER_LOSS=300.0
 
@@ -151,6 +159,14 @@ def load_scalp_config_from_env() -> ScalpConfig:
     def get_int(key: str, default: int) -> int:
         return int(os.getenv(key, str(default)))
 
+    def get_int_or_none(key: str, default: int | None) -> int | None:
+        """Get int, treating 0 as None (no limit)."""
+        val = os.getenv(key)
+        if val is None:
+            return default
+        int_val = int(val)
+        return None if int_val == 0 else int_val
+
     return ScalpConfig(
         enabled=get_bool("SCALP_ENABLED", False),
         eval_interval_ms=get_int("SCALP_EVAL_INTERVAL_MS", 200),
@@ -158,19 +174,20 @@ def load_scalp_config_from_env() -> ScalpConfig:
         momentum_threshold_pct=get_float("SCALP_MOMENTUM_THRESHOLD", 0.5),
         momentum_window_seconds=get_int("SCALP_MOMENTUM_WINDOW", 30),
         volume_spike_ratio=get_float("SCALP_VOLUME_SPIKE_RATIO", 1.5),
-        target_delta=get_float("SCALP_TARGET_DELTA", 0.35),
-        delta_tolerance=get_float("SCALP_DELTA_TOLERANCE", 0.10),
-        max_spread_pct=get_float("SCALP_MAX_SPREAD_PCT", 8.0),
+        target_delta=get_float("SCALP_TARGET_DELTA", 0.40),
+        delta_tolerance=get_float("SCALP_DELTA_TOLERANCE", 0.15),
+        max_spread_pct=get_float("SCALP_MAX_SPREAD_PCT", 10.0),
         min_open_interest=get_int("SCALP_MIN_OI", 100),
-        max_dte=get_int("SCALP_MAX_DTE", 1),
-        prefer_0dte=get_bool("SCALP_PREFER_0DTE", True),
-        take_profit_pct=get_float("SCALP_TAKE_PROFIT", 30.0),
+        min_dte=get_int("SCALP_MIN_DTE", 1),
+        target_dte=get_int("SCALP_TARGET_DTE", 2),
+        max_dte=get_int("SCALP_MAX_DTE", 3),
+        take_profit_pct=get_float("SCALP_TAKE_PROFIT", 20.0),
         stop_loss_pct=get_float("SCALP_STOP_LOSS", 15.0),
-        max_hold_minutes=get_int("SCALP_MAX_HOLD_MINUTES", 15),
+        max_hold_minutes=get_int_or_none("SCALP_MAX_HOLD_MINUTES", None),
         max_daily_scalps=get_int("SCALP_MAX_DAILY", 10),
         max_concurrent_scalps=get_int("SCALP_MAX_CONCURRENT", 1),
         scalp_position_size_pct=get_float("SCALP_POSITION_SIZE", 5.0),
-        max_contract_price=get_float("SCALP_MAX_CONTRACT_PRICE", 5.0),
+        max_contract_price=get_float("SCALP_MAX_CONTRACT_PRICE", 3.0),
         min_signal_interval_seconds=get_float("SCALP_MIN_SIGNAL_INTERVAL", 60.0),
         cooldown_after_loss_seconds=get_float("SCALP_COOLDOWN_AFTER_LOSS", 300.0),
     )

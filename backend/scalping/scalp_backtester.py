@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Callable, Literal
 
 if TYPE_CHECKING:
     from backend.scalping.replay import QuoteReplaySystem, ReplayQuote
@@ -162,6 +162,16 @@ class BacktestResult:
     trades_by_exit: dict[str, int] = field(default_factory=dict)
     pnl_by_exit: dict[str, float] = field(default_factory=dict)
 
+    # By direction (SCALP_CALL vs SCALP_PUT)
+    trades_by_direction: dict[str, int] = field(default_factory=dict)
+    pnl_by_direction: dict[str, float] = field(default_factory=dict)
+    winrate_by_direction: dict[str, float] = field(default_factory=dict)
+
+    # By DTE
+    trades_by_dte: dict[int, int] = field(default_factory=dict)
+    pnl_by_dte: dict[int, float] = field(default_factory=dict)
+    winrate_by_dte: dict[int, float] = field(default_factory=dict)
+
     # Risk metrics
     max_drawdown: float = 0.0
     sharpe_ratio: float = 0.0
@@ -211,6 +221,22 @@ class BacktestResult:
             pnl = self.pnl_by_exit.get(reason, 0)
             lines.append(f"  {reason}: {count} trades, ${pnl:+,.2f}")
 
+        lines.append("")
+        lines.append(f"{'BY DIRECTION':=^60}")
+        for direction in sorted(self.trades_by_direction.keys()):
+            count = self.trades_by_direction[direction]
+            pnl = self.pnl_by_direction.get(direction, 0)
+            wr = self.winrate_by_direction.get(direction, 0)
+            lines.append(f"  {direction}: {count} trades, ${pnl:+,.2f}, {wr:.1%} WR")
+
+        lines.append("")
+        lines.append(f"{'BY DTE':=^60}")
+        for dte in sorted(self.trades_by_dte.keys()):
+            count = self.trades_by_dte[dte]
+            pnl = self.pnl_by_dte.get(dte, 0)
+            wr = self.winrate_by_dte.get(dte, 0)
+            lines.append(f"  DTE={dte}: {count} trades, ${pnl:+,.2f}, {wr:.1%} WR")
+
         lines.append("=" * 60)
         return "\n".join(lines)
 
@@ -241,6 +267,12 @@ class BacktestResult:
             },
             "trades_by_exit": self.trades_by_exit,
             "pnl_by_exit": {k: round(v, 2) for k, v in self.pnl_by_exit.items()},
+            "trades_by_direction": self.trades_by_direction,
+            "pnl_by_direction": {k: round(v, 2) for k, v in self.pnl_by_direction.items()},
+            "winrate_by_direction": {k: round(v, 4) for k, v in self.winrate_by_direction.items()},
+            "trades_by_dte": self.trades_by_dte,
+            "pnl_by_dte": {str(k): round(v, 2) for k, v in self.pnl_by_dte.items()},
+            "winrate_by_dte": {str(k): round(v, 4) for k, v in self.winrate_by_dte.items()},
         }
 
 
@@ -295,17 +327,22 @@ class ScalpBacktester:
         self._open_trade: ScalpTrade | None = None
         self._current_quote: dict[str, "ReplayQuote"] = {}  # By option symbol
         self._underlying_price: float = 0.0
+        self._current_day: date | None = None  # Track current day for cache invalidation
 
     def run(
         self,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
+        on_day_start: "Callable[[date], None] | None" = None,
+        on_day_end: "Callable[[date, int], None] | None" = None,
     ) -> BacktestResult:
         """Run full backtest.
 
         Args:
             start_date: Optional start date filter
             end_date: Optional end date filter
+            on_day_start: Callback at start of each day
+            on_day_end: Callback at end of each day with tick count
 
         Returns:
             BacktestResult with all trades and statistics
@@ -316,6 +353,7 @@ class ScalpBacktester:
         self._trades = []
         self._open_trade = None
         self._current_quote = {}
+        self._current_day = None
         self.generator.reset()
 
         # Get date range
@@ -326,13 +364,20 @@ class ScalpBacktester:
 
         # Track trading days
         trading_days = set()
+        last_time = None
 
         # Process each quote
-        for tick in self.replay.replay(start_date, end_date):
+        for tick in self.replay.replay(start_date, end_date, on_day_start=on_day_start, on_day_end=on_day_end):
             current_time = tick.timestamp
+            last_time = current_time
 
-            # Track trading day
-            trading_days.add(current_time.date())
+            # Track trading day and clear stale quote cache on day change
+            current_date = current_time.date()
+            if self._current_day != current_date:
+                # New trading day - clear quote cache to prevent stale/expired options
+                self._current_quote.clear()
+                self._current_day = current_date
+            trading_days.add(current_date)
 
             # Update quote cache
             if tick.is_underlying:
@@ -369,7 +414,7 @@ class ScalpBacktester:
             # Only look for new signals if no open trade
             if not self._open_trade and self._underlying_price > 0:
                 # Build available options list from current quotes
-                self._update_available_options()
+                self._update_available_options(current_time)
 
                 # Evaluate for signals
                 signal = self.generator.evaluate(current_time, self._underlying_price)
@@ -378,8 +423,8 @@ class ScalpBacktester:
                     self._open_trade_from_signal(signal)
 
         # Force close any remaining open trade
-        if self._open_trade:
-            self._force_exit(self.replay.end_time, "eod")
+        if self._open_trade and last_time:
+            self._force_exit(last_time, "eod")
 
         # Calculate statistics
         result = self._calculate_statistics(start_date, end_date, len(trading_days))
@@ -387,9 +432,15 @@ class ScalpBacktester:
 
         return result
 
-    def _update_available_options(self) -> None:
-        """Build options list from current quotes for signal generator."""
+    def _update_available_options(self, current_time: datetime) -> None:
+        """Build options list from current quotes for signal generator.
+
+        Args:
+            current_time: Current simulation time (used for DTE calculation)
+        """
         options = []
+        current_date = current_time.date()
+
         for symbol, quote in self._current_quote.items():
             # Parse option details from OCC symbol
             # Format: TSLA240105C00420000
@@ -412,15 +463,19 @@ class ScalpBacktester:
                 expiry_str = symbol[type_idx - 6 : type_idx]
                 expiry = f"20{expiry_str[:2]}-{expiry_str[2:4]}-{expiry_str[4:6]}"
 
-                # Calculate DTE
-                from datetime import date
-
+                # Calculate expiry date
                 exp_date = date(
                     int(f"20{expiry_str[:2]}"),
                     int(expiry_str[2:4]),
                     int(expiry_str[4:6]),
                 )
-                dte = (exp_date - quote.timestamp.date()).days
+
+                # CRITICAL FIX: Skip already-expired options
+                if exp_date < current_date:
+                    continue
+
+                # CRITICAL FIX: Calculate DTE using current simulation time, not quote timestamp
+                dte = (exp_date - current_date).days
 
                 options.append(
                     {
@@ -543,11 +598,29 @@ class ScalpBacktester:
         elif pnl_pct <= -self.config.stop_loss_pct:
             exit_reason = "stop_loss"
 
-        # 3. Time exit
-        hold_seconds = (current_time - trade.entry_time).total_seconds()
-        max_hold_seconds = self.config.max_hold_minutes * 60
-        if hold_seconds >= max_hold_seconds:
-            exit_reason = "time_exit"
+        # 3. Time exit (only if max_hold_minutes is set - None = allow overnight)
+        elif self.config.max_hold_minutes is not None:
+            hold_seconds = (current_time - trade.entry_time).total_seconds()
+            max_hold_seconds = self.config.max_hold_minutes * 60
+            if hold_seconds >= max_hold_seconds:
+                exit_reason = "time_exit"
+
+        # 4. Option expiration - MUST exit on or after expiry date
+        if exit_reason is None and trade.expiry:
+            try:
+                # Parse expiry date (format: "2024-01-07")
+                expiry_date = date.fromisoformat(trade.expiry[:10])
+                current_date = current_time.date()
+
+                # Exit at market close on expiry day or if somehow past expiry
+                if current_date >= expiry_date:
+                    exit_reason = "expiration"
+                    # Option likely worthless or near-worthless at expiration
+                    # Use current quote if available, otherwise assume total loss
+                    if current_price <= 0:
+                        current_price = 0.01  # Penny to avoid division issues
+            except (ValueError, TypeError):
+                pass  # Invalid expiry format, skip check
 
         # Execute exit if triggered
         if exit_reason:
@@ -664,6 +737,20 @@ class ScalpBacktester:
                     result.pnl_by_exit.get(reason, 0) + trade.pnl_dollars
                 )
 
+            # By direction (SCALP_CALL vs SCALP_PUT)
+            direction = trade.signal_type
+            result.trades_by_direction[direction] = (
+                result.trades_by_direction.get(direction, 0) + 1
+            )
+            result.pnl_by_direction[direction] = (
+                result.pnl_by_direction.get(direction, 0) + trade.pnl_dollars
+            )
+
+            # By DTE
+            dte = trade.dte
+            result.trades_by_dte[dte] = result.trades_by_dte.get(dte, 0) + 1
+            result.pnl_by_dte[dte] = result.pnl_by_dte.get(dte, 0) + trade.pnl_dollars
+
         # Calculate rates
         result.total_pnl = result.gross_profit - result.gross_loss
 
@@ -700,6 +787,20 @@ class ScalpBacktester:
             trigger_wins = sum(1 for t in trigger_trades if t.pnl_dollars > 0)
             if trigger_trades:
                 result.winrate_by_trigger[trigger] = trigger_wins / len(trigger_trades)
+
+        # Win rate by direction
+        for direction in result.trades_by_direction:
+            dir_trades = [t for t in self._trades if t.signal_type == direction]
+            dir_wins = sum(1 for t in dir_trades if t.pnl_dollars > 0)
+            if dir_trades:
+                result.winrate_by_direction[direction] = dir_wins / len(dir_trades)
+
+        # Win rate by DTE
+        for dte in result.trades_by_dte:
+            dte_trades = [t for t in self._trades if t.dte == dte]
+            dte_wins = sum(1 for t in dte_trades if t.pnl_dollars > 0)
+            if dte_trades:
+                result.winrate_by_dte[dte] = dte_wins / len(dte_trades)
 
         return result
 

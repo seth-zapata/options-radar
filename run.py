@@ -61,6 +61,7 @@ MODE_PRESETS = {
 
 def run_backtest(args):
     """Run scalping backtest with DataBento data."""
+    import asyncio
     from datetime import datetime
     from pathlib import Path
     import json
@@ -73,6 +74,7 @@ def run_backtest(args):
     from backend.scalping.volume_analyzer import VolumeAnalyzer
     from backend.scalping.technical_scalper import TechnicalScalper
     from backend.scalping.scalp_backtester import ScalpBacktester
+    from backend.scalping.bar_cache import BarCache, SecondBarCache
     from backend.data.databento_loader import DataBentoLoader
 
     # Parse dates
@@ -94,22 +96,52 @@ def run_backtest(args):
         available_dates = [d for d in available_dates if d <= end_date]
     print(f"Backtest range: {len(available_dates)} days")
 
-    # Use relaxed config for backtesting (TSLA 0DTE options are expensive)
+    # Optimized config based on backtest analysis:
+    # - Skip 0DTE (3.5% win rate), prefer DTE=2 (66.7% win rate)
+    # - Cheap options win more (avg winner $2.86)
+    # - Lower TP from 30% to 20% to capture more winners
+    # - Allow overnight holds (no time limit)
     config = ScalpConfig(
         enabled=True,
-        # Relaxed for backtesting
-        max_contract_price=20.0,  # TSLA 0DTE options often $5-20
-        delta_tolerance=0.25,  # Accept wider delta range (0.10-0.60)
-        target_delta=0.40,  # Slightly higher target for TSLA
-        max_spread_pct=10.0,  # Allow wider spreads in backtest
-        # Keep other defaults
+        # DTE filtering - KEY INSIGHT from backtest
+        min_dte=1,  # SKIP 0DTE - only 3.5% win rate
+        target_dte=2,  # Prefer DTE=2 - 66.7% win rate
+        max_dte=3,  # Allow DTE 1-3
+        # Price filtering - cheap options win more
+        max_contract_price=3.00,  # Winners avg $2.86 entry
+        # Delta/spread settings
+        target_delta=0.40,
+        delta_tolerance=0.15,
+        max_spread_pct=10.0,
+        # Risk management
+        take_profit_pct=20.0,  # Lowered from 30% to capture more winners
+        stop_loss_pct=15.0,
+        max_hold_minutes=None,  # Allow overnight holds
+        # Signal generation
         momentum_threshold_pct=0.5,
         momentum_window_seconds=30,
-        take_profit_pct=30.0,
-        stop_loss_pct=15.0,
-        max_hold_minutes=15,
     )
-    replay = QuoteReplaySystem(loader)
+
+    # Fetch real TSLA bars for accurate underlying price tracking
+    bt_start = start_date or available_dates[0]
+    bt_end = end_date or available_dates[-1]
+
+    # Use 1-second bars for accurate momentum detection (no lookahead bias)
+    second_bar_cache = SecondBarCache()
+    print("Fetching TSLA 1-second bars for momentum detection...")
+    asyncio.run(second_bar_cache.fetch_and_cache_range("TSLA", bt_start, bt_end))
+
+    # Also have 1-minute bars as fallback
+    bar_cache = BarCache()
+    print("Fetching TSLA 1-minute bars as fallback...")
+    asyncio.run(bar_cache.fetch_and_cache_range("TSLA", bt_start, bt_end))
+
+    replay = QuoteReplaySystem(
+        loader,
+        max_dte=config.max_dte,
+        bar_cache=bar_cache,
+        second_bar_cache=second_bar_cache
+    )
 
     if len(available_dates) == 0:
         print("No data in requested date range.")
@@ -128,13 +160,29 @@ def run_backtest(args):
         technical_scalper=technical,
     )
 
-    # Run backtest
+    # Run backtest with progress logging
     print("Running backtest...")
     backtester = ScalpBacktester(config, replay, generator)
-    # Use first/last available dates if not specified
-    bt_start = start_date or available_dates[0]
-    bt_end = end_date or available_dates[-1]
-    result = backtester.run(bt_start, bt_end)
+
+    # Progress tracking
+    import time as _time
+    backtest_start_time = _time.time()
+    total_days = len([d for d in available_dates if bt_start <= d <= bt_end])
+    days_processed = [0]  # Use list for closure
+
+    def on_day_start(current_date):
+        days_processed[0] += 1
+        elapsed = _time.time() - backtest_start_time
+        if days_processed[0] > 1:
+            avg_per_day = elapsed / (days_processed[0] - 1)
+            remaining_days = total_days - days_processed[0] + 1
+            eta_seconds = avg_per_day * remaining_days
+            eta_min = eta_seconds / 60
+            print(f"  Processing {current_date} ({days_processed[0]}/{total_days}) - ETA: {eta_min:.1f} min", flush=True)
+        else:
+            print(f"  Processing {current_date} ({days_processed[0]}/{total_days})...", flush=True)
+
+    result = backtester.run(bt_start, bt_end, on_day_start=on_day_start)
 
     # Print summary
     print()
