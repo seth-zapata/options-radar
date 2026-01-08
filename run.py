@@ -96,17 +96,19 @@ def run_backtest(args):
         available_dates = [d for d in available_dates if d <= end_date]
     print(f"Backtest range: {len(available_dates)} days")
 
-    # Optimized config based on backtest analysis:
-    # - Skip 0DTE (3.5% win rate), prefer DTE=2 (66.7% win rate)
+    # Optimized config based on 251-trade backtest analysis:
+    # - Soft DTE preference: DTE=1 (63.4% WR) > DTE=2 > DTE=3, never 0DTE
+    # - Time stop: exit unprofitable trades after 5 min (69% WR <5min vs 47% >5min)
+    # - Confidence cap: skip conf >75 (80+ has 33% WR - overextended)
     # - Cheap options win more (avg winner $2.86)
-    # - Lower TP from 30% to 20% to capture more winners
-    # - Allow overnight holds (no time limit)
     config = ScalpConfig(
         enabled=True,
-        # DTE filtering - KEY INSIGHT from backtest
-        min_dte=1,  # SKIP 0DTE - only 3.5% win rate
-        target_dte=2,  # Prefer DTE=2 - 66.7% win rate
+        # DTE filtering - soft preference order
+        min_dte=1,  # SKIP 0DTE - never use
         max_dte=3,  # Allow DTE 1-3
+        dte_preference=(1, 2, 3),  # Prefer DTE=1 (63.4% WR, $57/trade)
+        # Confidence cap - skip overextended moves
+        max_confidence=75,  # 80+ conf has 33% WR (mean reversion)
         # Price filtering - cheap options win more
         max_contract_price=3.00,  # Winners avg $2.86 entry
         # Delta/spread settings
@@ -117,6 +119,7 @@ def run_backtest(args):
         take_profit_pct=20.0,  # Lowered from 30% to capture more winners
         stop_loss_pct=15.0,
         max_hold_minutes=None,  # Allow overnight holds
+        time_stop_minutes=5,  # Exit unprofitable trades after 5 min
         # Signal generation
         momentum_threshold_pct=0.5,
         momentum_window_seconds=30,
