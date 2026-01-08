@@ -2,11 +2,19 @@
 
 Uses the QuoteReplaySystem and ScalpSignalGenerator to simulate scalp
 trades on historical data and calculate performance metrics.
+
+Now includes full portfolio simulation with:
+- Position sizing based on 2% risk per trade
+- Equity curve tracking
+- Risk metrics (Sharpe, Sortino, Max Drawdown)
+- Monthly returns breakdown
 """
 
 from __future__ import annotations
 
 import logging
+import math
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -19,6 +27,19 @@ if TYPE_CHECKING:
 from backend.scalping.config import ScalpConfig
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PortfolioConfig:
+    """Portfolio configuration for backtesting.
+
+    Controls position sizing, risk management, and equity tracking.
+    """
+
+    starting_equity: float = 100_000.0  # Initial portfolio value
+    risk_per_trade_pct: float = 2.0  # Risk 2% of equity per trade
+    max_contracts: int = 50  # Liquidity cap
+    min_contracts: int = 1  # Minimum position size
 
 
 @dataclass
@@ -62,6 +83,10 @@ class ScalpTrade:
     max_gain_pct: float = 0.0
     max_drawdown_pct: float = 0.0
 
+    # Portfolio tracking
+    equity_before: float = 0.0  # Portfolio equity before trade
+    equity_after: float = 0.0  # Portfolio equity after trade
+
     # Timing
     hold_seconds: int = 0
 
@@ -102,6 +127,8 @@ class ScalpTrade:
             "pnl_pct": round(self.pnl_pct, 2),
             "max_gain_pct": round(self.max_gain_pct, 2),
             "max_drawdown_pct": round(self.max_drawdown_pct, 2),
+            "equity_before": round(self.equity_before, 2),
+            "equity_after": round(self.equity_after, 2),
             "hold_seconds": self.hold_seconds,
         }
 
@@ -174,7 +201,23 @@ class BacktestResult:
 
     # Risk metrics
     max_drawdown: float = 0.0
+    max_drawdown_pct: float = 0.0
     sharpe_ratio: float = 0.0
+    sortino_ratio: float = 0.0
+    calmar_ratio: float = 0.0
+
+    # Portfolio tracking
+    starting_equity: float = 100_000.0
+    ending_equity: float = 100_000.0
+    total_return_pct: float = 0.0
+    cagr: float = 0.0  # Compound annual growth rate
+
+    # Equity curve (date -> equity)
+    daily_equity: dict[str, float] = field(default_factory=dict)
+    high_water_mark: float = 0.0
+
+    # Monthly returns (YYYY-MM -> return %)
+    monthly_returns: dict[str, float] = field(default_factory=dict)
 
     # Trade list
     trades: list[ScalpTrade] = field(default_factory=list)
@@ -191,7 +234,19 @@ class BacktestResult:
             f"Period: {start_str} to {end_str}",
             f"Trading Days: {self.trading_days}",
             "",
-            f"{'PERFORMANCE':=^60}",
+            f"{'PORTFOLIO':=^60}",
+            f"Starting Equity: ${self.starting_equity:,.2f}",
+            f"Ending Equity:   ${self.ending_equity:,.2f}",
+            f"Total Return:    {self.total_return_pct:+.2f}%",
+            f"CAGR:            {self.cagr:.2f}%",
+            "",
+            f"{'RISK METRICS':=^60}",
+            f"Max Drawdown:    ${self.max_drawdown:,.2f} ({self.max_drawdown_pct:.2f}%)",
+            f"Sharpe Ratio:    {self.sharpe_ratio:.2f}",
+            f"Sortino Ratio:   {self.sortino_ratio:.2f}",
+            f"Calmar Ratio:    {self.calmar_ratio:.2f}",
+            "",
+            f"{'TRADE PERFORMANCE':=^60}",
             f"Total Trades: {self.total_trades}",
             f"Win Rate: {self.win_rate:.1%} ({self.winners}W / {self.losers}L)",
             f"Total P&L: ${self.total_pnl:,.2f}",
@@ -237,6 +292,14 @@ class BacktestResult:
             wr = self.winrate_by_dte.get(dte, 0)
             lines.append(f"  DTE={dte}: {count} trades, ${pnl:+,.2f}, {wr:.1%} WR")
 
+        # Monthly returns
+        if self.monthly_returns:
+            lines.append("")
+            lines.append(f"{'MONTHLY RETURNS':=^60}")
+            for month in sorted(self.monthly_returns.keys()):
+                ret = self.monthly_returns[month]
+                lines.append(f"  {month}: {ret:+.2f}%")
+
         lines.append("=" * 60)
         return "\n".join(lines)
 
@@ -248,6 +311,18 @@ class BacktestResult:
             "start_date": start_str,
             "end_date": end_str,
             "trading_days": self.trading_days,
+            # Portfolio metrics
+            "starting_equity": round(self.starting_equity, 2),
+            "ending_equity": round(self.ending_equity, 2),
+            "total_return_pct": round(self.total_return_pct, 2),
+            "cagr": round(self.cagr, 2),
+            # Risk metrics
+            "max_drawdown": round(self.max_drawdown, 2),
+            "max_drawdown_pct": round(self.max_drawdown_pct, 2),
+            "sharpe_ratio": round(self.sharpe_ratio, 2),
+            "sortino_ratio": round(self.sortino_ratio, 2),
+            "calmar_ratio": round(self.calmar_ratio, 2),
+            # Trade stats
             "total_trades": self.total_trades,
             "winners": self.winners,
             "losers": self.losers,
@@ -260,6 +335,7 @@ class BacktestResult:
             "largest_win": round(self.largest_win, 2),
             "largest_loss": round(self.largest_loss, 2),
             "avg_hold_seconds": round(self.avg_hold_seconds, 1),
+            # Breakdowns
             "trades_by_trigger": self.trades_by_trigger,
             "pnl_by_trigger": {k: round(v, 2) for k, v in self.pnl_by_trigger.items()},
             "winrate_by_trigger": {
@@ -273,6 +349,9 @@ class BacktestResult:
             "trades_by_dte": self.trades_by_dte,
             "pnl_by_dte": {str(k): round(v, 2) for k, v in self.pnl_by_dte.items()},
             "winrate_by_dte": {str(k): round(v, 4) for k, v in self.winrate_by_dte.items()},
+            # Equity tracking
+            "daily_equity": {k: round(v, 2) for k, v in self.daily_equity.items()},
+            "monthly_returns": {k: round(v, 2) for k, v in self.monthly_returns.items()},
         }
 
 
@@ -308,6 +387,7 @@ class ScalpBacktester:
         replay_system: "QuoteReplaySystem",
         signal_generator: "ScalpSignalGenerator",
         slippage_pct: float = 0.5,
+        portfolio_config: PortfolioConfig | None = None,
     ):
         """Initialize backtester.
 
@@ -316,11 +396,13 @@ class ScalpBacktester:
             replay_system: Loaded quote replay system
             signal_generator: Configured signal generator
             slippage_pct: Simulated slippage percentage on fills
+            portfolio_config: Portfolio configuration (defaults to $100k, 2% risk)
         """
         self.config = config
         self.replay = replay_system
         self.generator = signal_generator
         self.slippage_pct = slippage_pct
+        self.portfolio_config = portfolio_config or PortfolioConfig()
 
         # State
         self._trades: list[ScalpTrade] = []
@@ -328,6 +410,12 @@ class ScalpBacktester:
         self._current_quote: dict[str, "ReplayQuote"] = {}  # By option symbol
         self._underlying_price: float = 0.0
         self._current_day: date | None = None  # Track current day for cache invalidation
+
+        # Portfolio state
+        self._current_equity: float = self.portfolio_config.starting_equity
+        self._high_water_mark: float = self.portfolio_config.starting_equity
+        self._daily_equity: dict[str, float] = {}  # date_str -> equity
+        self._daily_returns: list[float] = []  # For Sharpe/Sortino calculation
 
     def run(
         self,
@@ -356,6 +444,13 @@ class ScalpBacktester:
         self._current_day = None
         self.generator.reset()
 
+        # Reset portfolio state
+        self._current_equity = self.portfolio_config.starting_equity
+        self._high_water_mark = self.portfolio_config.starting_equity
+        self._daily_equity = {}
+        self._daily_returns = []
+        prev_day_equity = self._current_equity
+
         # Get date range
         if start_date is None:
             start_date = self.replay.start_time
@@ -374,6 +469,19 @@ class ScalpBacktester:
             # Track trading day and clear stale quote cache on day change
             current_date = current_time.date()
             if self._current_day != current_date:
+                # Record end-of-day equity for previous day
+                if self._current_day is not None:
+                    date_str = self._current_day.isoformat()
+                    self._daily_equity[date_str] = self._current_equity
+                    # Calculate daily return
+                    if prev_day_equity > 0:
+                        daily_return = (self._current_equity - prev_day_equity) / prev_day_equity * 100
+                        self._daily_returns.append(daily_return)
+                    prev_day_equity = self._current_equity
+                    # Update high water mark
+                    if self._current_equity > self._high_water_mark:
+                        self._high_water_mark = self._current_equity
+
                 # New trading day - clear quote cache to prevent stale/expired options
                 self._current_quote.clear()
                 self._current_day = current_date
@@ -425,6 +533,16 @@ class ScalpBacktester:
         # Force close any remaining open trade
         if self._open_trade and last_time:
             self._force_exit(last_time, "eod")
+
+        # Record final day's equity
+        if self._current_day is not None:
+            date_str = self._current_day.isoformat()
+            self._daily_equity[date_str] = self._current_equity
+            if prev_day_equity > 0:
+                daily_return = (self._current_equity - prev_day_equity) / prev_day_equity * 100
+                self._daily_returns.append(daily_return)
+            if self._current_equity > self._high_water_mark:
+                self._high_water_mark = self._current_equity
 
         # Calculate statistics
         result = self._calculate_statistics(start_date, end_date, len(trading_days))
@@ -531,11 +649,48 @@ class ScalpBacktester:
             else:  # ATM
                 return -0.5
 
+    def _calculate_position_size(self, entry_price: float) -> int:
+        """Calculate number of contracts based on risk management.
+
+        Position sizing formula:
+        - risk_per_trade = current_equity * risk_per_trade_pct (2%)
+        - risk_per_contract = entry_price * stop_loss_pct * 100 (per contract)
+        - contracts = risk_per_trade / risk_per_contract
+
+        Args:
+            entry_price: Option entry price (per share)
+
+        Returns:
+            Number of contracts to trade
+        """
+        pc = self.portfolio_config
+
+        # Calculate risk amount (2% of current equity)
+        risk_per_trade = self._current_equity * (pc.risk_per_trade_pct / 100)
+
+        # Calculate risk per contract (entry * stop_loss_pct * 100 shares)
+        # e.g., $1.50 entry * 15% stop = $0.225 risk per share * 100 = $22.50 per contract
+        risk_per_contract = entry_price * (self.config.stop_loss_pct / 100) * 100
+
+        if risk_per_contract <= 0:
+            return pc.min_contracts
+
+        # Calculate contracts
+        contracts = int(risk_per_trade / risk_per_contract)
+
+        # Apply limits
+        contracts = max(pc.min_contracts, min(contracts, pc.max_contracts))
+
+        return contracts
+
     def _open_trade_from_signal(self, signal: "ScalpSignal") -> None:
         """Open a new trade from a signal."""
         # Apply slippage to entry price
         slippage_mult = 1 + (self.slippage_pct / 100)
         fill_price = signal.ask_price * slippage_mult
+
+        # Calculate position size based on risk management
+        contracts = self._calculate_position_size(fill_price)
 
         self._open_trade = ScalpTrade(
             signal_id=signal.id,
@@ -551,12 +706,13 @@ class ScalpBacktester:
             entry_time=signal.timestamp,
             entry_price=fill_price,
             underlying_at_entry=signal.underlying_price,
-            contracts=signal.suggested_contracts,
+            contracts=contracts,
+            equity_before=self._current_equity,
         )
 
         logger.debug(
             f"Opened trade: {signal.signal_type} {signal.option_symbol} "
-            f"@ ${fill_price:.2f}"
+            f"@ ${fill_price:.2f} x {contracts} contracts (equity: ${self._current_equity:,.2f})"
         )
 
     def _check_exit(self, current_time: datetime) -> None:
@@ -663,6 +819,10 @@ class ScalpBacktester:
         trade.pnl_dollars = pnl_per_contract * trade.contracts
         trade.pnl_pct = ((fill_price - trade.entry_price) / trade.entry_price) * 100
 
+        # Update portfolio equity
+        self._current_equity += trade.pnl_dollars
+        trade.equity_after = self._current_equity
+
         # Store trade
         self._trades.append(trade)
         self._open_trade = None
@@ -674,7 +834,7 @@ class ScalpBacktester:
         logger.debug(
             f"Closed trade: {trade.option_symbol} @ ${fill_price:.2f}, "
             f"P&L: ${trade.pnl_dollars:+.2f} ({trade.pnl_pct:+.1f}%), "
-            f"reason: {exit_reason}"
+            f"reason: {exit_reason}, equity: ${self._current_equity:,.2f}"
         )
 
     def _force_exit(self, exit_time: datetime, reason: str) -> None:
@@ -811,7 +971,99 @@ class ScalpBacktester:
             if dte_trades:
                 result.winrate_by_dte[dte] = dte_wins / len(dte_trades)
 
+        # Portfolio metrics
+        result.starting_equity = self.portfolio_config.starting_equity
+        result.ending_equity = self._current_equity
+        result.total_return_pct = (
+            (self._current_equity - self.portfolio_config.starting_equity)
+            / self.portfolio_config.starting_equity
+            * 100
+        )
+        result.daily_equity = self._daily_equity.copy()
+        result.high_water_mark = self._high_water_mark
+
+        # Calculate max drawdown from equity curve
+        if self._daily_equity:
+            equity_values = list(self._daily_equity.values())
+            peak = equity_values[0]
+            max_dd = 0.0
+            max_dd_pct = 0.0
+            for equity in equity_values:
+                if equity > peak:
+                    peak = equity
+                drawdown = peak - equity
+                drawdown_pct = (drawdown / peak) * 100 if peak > 0 else 0
+                if drawdown > max_dd:
+                    max_dd = drawdown
+                    max_dd_pct = drawdown_pct
+            result.max_drawdown = max_dd
+            result.max_drawdown_pct = max_dd_pct
+
+        # Calculate risk metrics from daily returns
+        if self._daily_returns:
+            avg_return = sum(self._daily_returns) / len(self._daily_returns)
+
+            # Standard deviation of returns
+            if len(self._daily_returns) > 1:
+                variance = sum((r - avg_return) ** 2 for r in self._daily_returns) / (len(self._daily_returns) - 1)
+                std_dev = math.sqrt(variance)
+            else:
+                std_dev = 0
+
+            # Sharpe Ratio (assuming 0% risk-free rate, annualized)
+            # Annualize: multiply by sqrt(252) for daily returns
+            if std_dev > 0:
+                result.sharpe_ratio = (avg_return / std_dev) * math.sqrt(252)
+
+            # Sortino Ratio (only downside deviation)
+            negative_returns = [r for r in self._daily_returns if r < 0]
+            if negative_returns:
+                downside_variance = sum(r ** 2 for r in negative_returns) / len(negative_returns)
+                downside_dev = math.sqrt(downside_variance)
+                if downside_dev > 0:
+                    result.sortino_ratio = (avg_return / downside_dev) * math.sqrt(252)
+
+        # Calmar Ratio (annual return / max drawdown)
+        if result.max_drawdown_pct > 0 and trading_days > 0:
+            # Annualize return
+            annual_return = result.total_return_pct * (252 / trading_days)
+            result.calmar_ratio = annual_return / result.max_drawdown_pct
+
+        # CAGR (Compound Annual Growth Rate)
+        if trading_days > 0:
+            years = trading_days / 252
+            if years > 0 and self.portfolio_config.starting_equity > 0:
+                total_return = self._current_equity / self.portfolio_config.starting_equity
+                if total_return > 0:
+                    result.cagr = (math.pow(total_return, 1 / years) - 1) * 100
+
+        # Monthly returns
+        result.monthly_returns = self._calculate_monthly_returns()
+
         return result
+
+    def _calculate_monthly_returns(self) -> dict[str, float]:
+        """Calculate returns by month from daily equity curve."""
+        if not self._daily_equity:
+            return {}
+
+        monthly_returns: dict[str, float] = {}
+        monthly_start: dict[str, float] = {}  # First equity of month
+        monthly_end: dict[str, float] = {}  # Last equity of month
+
+        for date_str, equity in sorted(self._daily_equity.items()):
+            month_key = date_str[:7]  # YYYY-MM
+            if month_key not in monthly_start:
+                monthly_start[month_key] = equity
+            monthly_end[month_key] = equity
+
+        for month in monthly_start:
+            start_eq = monthly_start[month]
+            end_eq = monthly_end[month]
+            if start_eq > 0:
+                monthly_returns[month] = ((end_eq - start_eq) / start_eq) * 100
+
+        return monthly_returns
 
     @property
     def trades(self) -> list[ScalpTrade]:
