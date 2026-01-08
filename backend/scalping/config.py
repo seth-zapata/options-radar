@@ -80,19 +80,26 @@ class ScalpConfig:
     # Volume thresholds
     volume_spike_ratio: float = 1.5  # 1.5x normal volume required
 
-    # Option selection - Updated based on backtest analysis
+    # Option selection - Updated based on backtest analysis (251 trades)
     target_delta: float = 0.40
     delta_tolerance: float = 0.15  # Accept 0.25-0.55 delta
     max_spread_pct: float = 10.0  # Max 10% spread
     min_open_interest: int = 100  # Minimum OI
-    min_dte: int = 1  # SKIP 0DTE - backtest showed 3.5% win rate
-    target_dte: int = 2  # Prefer DTE=2 - backtest showed 66.7% win rate
+    min_dte: int = 1  # SKIP 0DTE - never use 0DTE
     max_dte: int = 3  # Allow up to DTE=3
+    # Soft DTE preference: prefer DTE=1 (63.4% WR, $57/trade) > DTE=2 > DTE=3
+    dte_preference: tuple[int, ...] = (1, 2, 3)  # Priority order
+
+    # Confidence filter - skip overextended moves (80+ confidence = 33% WR!)
+    max_confidence: int = 75  # Cap confidence to avoid mean-reversion losers
 
     # Risk management - Updated based on backtest analysis
     take_profit_pct: float = 20.0  # Lowered from 30% to capture more winners
     stop_loss_pct: float = 15.0
     max_hold_minutes: int | None = None  # None = no limit, allow overnight holds
+    # Time stop: exit at market if not profitable after X minutes
+    # Trades <5min have 69% WR, trades >5min drop to 47% WR
+    time_stop_minutes: int = 5  # Exit at breakeven if not profitable after 5 min
 
     # Position limits - Updated based on backtest analysis
     max_daily_scalps: int = 10
@@ -133,11 +140,13 @@ def load_scalp_config_from_env() -> ScalpConfig:
         SCALP_MAX_SPREAD_PCT=10.0
         SCALP_MIN_OI=100
         SCALP_MIN_DTE=1
-        SCALP_TARGET_DTE=2
         SCALP_MAX_DTE=3
+        SCALP_DTE_PREFERENCE=1,2,3  (comma-separated priority)
+        SCALP_MAX_CONFIDENCE=75
         SCALP_TAKE_PROFIT=20.0
         SCALP_STOP_LOSS=15.0
         SCALP_MAX_HOLD_MINUTES=0  (0 = no limit, allow overnight)
+        SCALP_TIME_STOP_MINUTES=5
         SCALP_MAX_DAILY=10
         SCALP_MAX_CONCURRENT=1
         SCALP_POSITION_SIZE=5.0
@@ -167,6 +176,13 @@ def load_scalp_config_from_env() -> ScalpConfig:
         int_val = int(val)
         return None if int_val == 0 else int_val
 
+    def get_int_tuple(key: str, default: tuple[int, ...]) -> tuple[int, ...]:
+        """Get tuple of ints from comma-separated string."""
+        val = os.getenv(key)
+        if val is None:
+            return default
+        return tuple(int(x.strip()) for x in val.split(","))
+
     return ScalpConfig(
         enabled=get_bool("SCALP_ENABLED", False),
         eval_interval_ms=get_int("SCALP_EVAL_INTERVAL_MS", 200),
@@ -179,11 +195,13 @@ def load_scalp_config_from_env() -> ScalpConfig:
         max_spread_pct=get_float("SCALP_MAX_SPREAD_PCT", 10.0),
         min_open_interest=get_int("SCALP_MIN_OI", 100),
         min_dte=get_int("SCALP_MIN_DTE", 1),
-        target_dte=get_int("SCALP_TARGET_DTE", 2),
         max_dte=get_int("SCALP_MAX_DTE", 3),
+        dte_preference=get_int_tuple("SCALP_DTE_PREFERENCE", (1, 2, 3)),
+        max_confidence=get_int("SCALP_MAX_CONFIDENCE", 75),
         take_profit_pct=get_float("SCALP_TAKE_PROFIT", 20.0),
         stop_loss_pct=get_float("SCALP_STOP_LOSS", 15.0),
         max_hold_minutes=get_int_or_none("SCALP_MAX_HOLD_MINUTES", None),
+        time_stop_minutes=get_int("SCALP_TIME_STOP_MINUTES", 5),
         max_daily_scalps=get_int("SCALP_MAX_DAILY", 10),
         max_concurrent_scalps=get_int("SCALP_MAX_CONCURRENT", 1),
         scalp_position_size_pct=get_float("SCALP_POSITION_SIZE", 5.0),

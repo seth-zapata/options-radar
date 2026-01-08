@@ -308,6 +308,14 @@ class ScalpSignalGenerator:
         # Higher confidence for stronger momentum
         confidence = min(80, 50 + int(abs(velocity_pct) * 20))
 
+        # Apply confidence cap - high confidence (80+) signals have 33% WR!
+        # Skip signals that are likely overextended mean-reversion candidates
+        if confidence > self.config.max_confidence:
+            logger.debug(
+                f"[{self.symbol}] Skipping overextended signal: conf={confidence} > max={self.config.max_confidence}"
+            )
+            return None
+
         return self._create_signal(
             current_time=current_time,
             underlying_price=underlying_price,
@@ -331,24 +339,30 @@ class ScalpSignalGenerator:
         vwap_signal = self.technical.check_vwap_signal(underlying_price, velocity_pct)
 
         if vwap_signal:
-            direction: Literal["SCALP_CALL", "SCALP_PUT"] = (
-                "SCALP_CALL" if vwap_signal.direction == "bullish" else "SCALP_PUT"
-            )
-            option_type = "C" if vwap_signal.direction == "bullish" else "P"
-
-            option = self._select_option(underlying_price, option_type)
-
-            if option:
-                return self._create_signal(
-                    current_time=current_time,
-                    underlying_price=underlying_price,
-                    velocity_pct=velocity_pct,
-                    volume_ratio=volume_ratio,
-                    trigger=vwap_signal.signal_type,
-                    direction=direction,
-                    option=option,
-                    confidence=vwap_signal.confidence,
+            # Apply confidence cap to technical signals too
+            if vwap_signal.confidence > self.config.max_confidence:
+                logger.debug(
+                    f"[{self.symbol}] Skipping overextended VWAP signal: conf={vwap_signal.confidence}"
                 )
+            else:
+                direction: Literal["SCALP_CALL", "SCALP_PUT"] = (
+                    "SCALP_CALL" if vwap_signal.direction == "bullish" else "SCALP_PUT"
+                )
+                option_type = "C" if vwap_signal.direction == "bullish" else "P"
+
+                option = self._select_option(underlying_price, option_type)
+
+                if option:
+                    return self._create_signal(
+                        current_time=current_time,
+                        underlying_price=underlying_price,
+                        velocity_pct=velocity_pct,
+                        volume_ratio=volume_ratio,
+                        trigger=vwap_signal.signal_type,
+                        direction=direction,
+                        option=option,
+                        confidence=vwap_signal.confidence,
+                    )
 
         # Check breakout signals
         breakout_signal = self.technical.check_breakout(
@@ -356,24 +370,30 @@ class ScalpSignalGenerator:
         )
 
         if breakout_signal:
-            direction = (
-                "SCALP_CALL" if breakout_signal.direction == "bullish" else "SCALP_PUT"
-            )
-            option_type = "C" if breakout_signal.direction == "bullish" else "P"
-
-            option = self._select_option(underlying_price, option_type)
-
-            if option:
-                return self._create_signal(
-                    current_time=current_time,
-                    underlying_price=underlying_price,
-                    velocity_pct=velocity_pct,
-                    volume_ratio=volume_ratio,
-                    trigger="breakout",
-                    direction=direction,
-                    option=option,
-                    confidence=breakout_signal.confidence,
+            # Apply confidence cap to breakout signals too
+            if breakout_signal.confidence > self.config.max_confidence:
+                logger.debug(
+                    f"[{self.symbol}] Skipping overextended breakout signal: conf={breakout_signal.confidence}"
                 )
+            else:
+                direction = (
+                    "SCALP_CALL" if breakout_signal.direction == "bullish" else "SCALP_PUT"
+                )
+                option_type = "C" if breakout_signal.direction == "bullish" else "P"
+
+                option = self._select_option(underlying_price, option_type)
+
+                if option:
+                    return self._create_signal(
+                        current_time=current_time,
+                        underlying_price=underlying_price,
+                        velocity_pct=velocity_pct,
+                        volume_ratio=volume_ratio,
+                        trigger="breakout",
+                        direction=direction,
+                        option=option,
+                        confidence=breakout_signal.confidence,
+                    )
 
         return None
 
@@ -382,12 +402,12 @@ class ScalpSignalGenerator:
         underlying_price: float,
         option_type: str,
     ) -> dict | None:
-        """Select best option for the scalp trade.
+        """Select best option for the scalp trade using SOFT DTE preference.
 
-        Criteria (updated based on backtest analysis):
+        Criteria (updated based on 251-trade backtest analysis):
         - Correct type (C/P)
-        - DTE between min_dte and max_dte (SKIP 0DTE - 3.5% win rate)
-        - Prefer target_dte (DTE=2 showed 66.7% win rate)
+        - DTE between min_dte and max_dte (SKIP 0DTE - never use)
+        - SOFT DTE preference: try DTE=1 first (63.4% WR), then 2, then 3
         - Delta near target (0.40 ± 0.15)
         - Spread under threshold
         - Price under max ($3 - cheap options win more)
@@ -399,6 +419,36 @@ class ScalpSignalGenerator:
         Returns:
             Best matching option dict, or None if none qualify
         """
+        # Try each DTE in preference order (soft preference)
+        for preferred_dte in self.config.dte_preference:
+            if preferred_dte < self.config.min_dte or preferred_dte > self.config.max_dte:
+                continue
+
+            candidate = self._find_best_option_for_dte(
+                underlying_price, option_type, preferred_dte
+            )
+            if candidate:
+                return candidate
+
+        # No option found at any preferred DTE
+        return None
+
+    def _find_best_option_for_dte(
+        self,
+        underlying_price: float,
+        option_type: str,
+        target_dte: int,
+    ) -> dict | None:
+        """Find best option for a specific DTE.
+
+        Args:
+            underlying_price: Current stock price
+            option_type: "C" for call, "P" for put
+            target_dte: The DTE to search for
+
+        Returns:
+            Best matching option dict, or None if none qualify
+        """
         candidates: list[tuple[float, dict]] = []
 
         for opt in self._available_options:
@@ -406,11 +456,9 @@ class ScalpSignalGenerator:
             if opt.get("option_type") != option_type:
                 continue
 
-            # Filter by DTE - HARD FILTER: skip 0DTE (min_dte=1)
+            # Filter by exact DTE (soft preference handled in caller)
             dte = opt.get("dte", 99)
-            if dte < self.config.min_dte:
-                continue  # Skip 0DTE - backtest showed 3.5% win rate
-            if dte > self.config.max_dte:
+            if dte != target_dte:
                 continue
 
             # Filter by delta (if available)
@@ -433,14 +481,8 @@ class ScalpSignalGenerator:
             if ask > self.config.max_contract_price:
                 continue
 
-            # Score candidate
+            # Score candidate (within same DTE)
             score = 0.0
-
-            # STRONG preference for target_dte (DTE=2 showed 66.7% win rate)
-            if dte == self.config.target_dte:
-                score += 20  # Strong bonus for target DTE
-            elif dte == self.config.target_dte - 1 or dte == self.config.target_dte + 1:
-                score += 10  # Moderate bonus for adjacent DTEs
 
             # Prefer cheaper options (backtest showed cheap options win more)
             # Max bonus of 10 for $0.50 options, decreasing to 0 for $3 options

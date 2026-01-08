@@ -590,6 +590,9 @@ class ScalpBacktester:
         # Check exit conditions
         exit_reason = None
 
+        # Calculate hold time
+        hold_seconds = (current_time - trade.entry_time).total_seconds()
+
         # 1. Take profit
         if pnl_pct >= self.config.take_profit_pct:
             exit_reason = "take_profit"
@@ -598,14 +601,20 @@ class ScalpBacktester:
         elif pnl_pct <= -self.config.stop_loss_pct:
             exit_reason = "stop_loss"
 
-        # 3. Time exit (only if max_hold_minutes is set - None = allow overnight)
+        # 3. TIME STOP: Exit if not profitable after time_stop_minutes
+        # Trades <5min have 69% WR, trades >5min drop to 47% WR
+        elif self.config.time_stop_minutes > 0:
+            time_stop_seconds = self.config.time_stop_minutes * 60
+            if hold_seconds >= time_stop_seconds and pnl_pct <= 0:
+                exit_reason = "time_stop"
+
+        # 4. Max hold time exit (only if max_hold_minutes is set - None = allow overnight)
         elif self.config.max_hold_minutes is not None:
-            hold_seconds = (current_time - trade.entry_time).total_seconds()
             max_hold_seconds = self.config.max_hold_minutes * 60
             if hold_seconds >= max_hold_seconds:
                 exit_reason = "time_exit"
 
-        # 4. Option expiration - MUST exit on or after expiry date
+        # 5. Option expiration - MUST exit on or after expiry date
         if exit_reason is None and trade.expiry:
             try:
                 # Parse expiry date (format: "2024-01-07")
