@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import logging
 import math
+import multiprocessing as mp
+import os
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Literal
@@ -27,6 +29,142 @@ if TYPE_CHECKING:
 from backend.scalping.config import ScalpConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _process_day_worker(args: tuple) -> list[dict]:
+    """Worker function for parallel day processing.
+
+    Must be a top-level function for multiprocessing pickle.
+    Creates all necessary objects internally and returns trades as dicts.
+
+    Args:
+        args: Tuple of (day, data_dir, second_bar_cache_dir, scalp_config_dict,
+              portfolio_config_dict, symbol)
+
+    Returns:
+        List of trade dictionaries for this day
+    """
+    (day, data_dir, second_bar_cache_dir, scalp_config_dict, portfolio_config_dict, symbol) = args
+
+    # Import here to avoid issues with multiprocessing
+    from backend.data.databento_loader import DataBentoLoader
+    from backend.scalping.bar_cache import BarCache, SecondBarCache
+    from backend.scalping.replay import QuoteReplaySystem
+    from backend.scalping.signal_generator import ScalpSignalGenerator
+    from backend.scalping.velocity_tracker import PriceVelocityTracker
+    from backend.scalping.volume_analyzer import VolumeAnalyzer
+    from backend.scalping.technical_scalper import TechnicalScalper
+
+    # Reconstruct configs from dicts
+    # Handle dte_preference conversion from list back to tuple
+    if "dte_preference" in scalp_config_dict:
+        scalp_config_dict["dte_preference"] = tuple(scalp_config_dict["dte_preference"])
+    scalp_config = ScalpConfig(**scalp_config_dict)
+    portfolio_cfg = PortfolioConfig(**portfolio_config_dict)
+
+    # Create loader and replay system
+    loader = DataBentoLoader(Path(data_dir))
+
+    # Create caches and load bars for this day
+    bar_cache = BarCache()
+    second_bar_cache = SecondBarCache(cache_dir=Path(second_bar_cache_dir) if second_bar_cache_dir else None)
+
+    # Load bars for this single day
+    import asyncio
+    asyncio.run(bar_cache.fetch_and_cache_range(symbol, day, day))
+    asyncio.run(second_bar_cache.fetch_and_cache_range(symbol, day, day))
+
+    replay = QuoteReplaySystem(
+        loader,
+        max_dte=scalp_config.max_dte,
+        bar_cache=bar_cache,
+        second_bar_cache=second_bar_cache,
+    )
+
+    # Create components for signal generator
+    velocity = PriceVelocityTracker(symbol)
+    volume = VolumeAnalyzer()
+    technical = TechnicalScalper(symbol)
+
+    generator = ScalpSignalGenerator(
+        symbol=symbol,
+        config=scalp_config,
+        velocity_tracker=velocity,
+        volume_analyzer=volume,
+        technical_scalper=technical,
+    )
+
+    # Create backtester
+    backtester = ScalpBacktester(
+        config=scalp_config,
+        replay_system=replay,
+        signal_generator=generator,
+        portfolio_config=portfolio_cfg,
+    )
+
+    # Run for just this day (no callbacks needed in worker)
+    result = backtester.run(day, day)
+
+    # Convert trades to dicts for pickling
+    return [_trade_to_dict(t) for t in result.trades]
+
+
+def _trade_to_dict(trade: "ScalpTrade") -> dict:
+    """Convert a ScalpTrade to a dict for pickling."""
+    return {
+        "signal_id": trade.signal_id,
+        "symbol": trade.symbol,
+        "signal_type": trade.signal_type,
+        "trigger": trade.trigger,
+        "confidence": trade.confidence,
+        "option_symbol": trade.option_symbol,
+        "strike": trade.strike,
+        "expiry": trade.expiry,
+        "delta": trade.delta,
+        "dte": trade.dte,
+        "entry_time": trade.entry_time.isoformat() if trade.entry_time else None,
+        "entry_price": trade.entry_price,
+        "underlying_at_entry": trade.underlying_at_entry,
+        "contracts": trade.contracts,
+        "exit_time": trade.exit_time.isoformat() if trade.exit_time else None,
+        "exit_price": trade.exit_price,
+        "underlying_at_exit": trade.underlying_at_exit,
+        "exit_reason": trade.exit_reason,
+        "pnl_dollars": trade.pnl_dollars,
+        "pnl_pct": trade.pnl_pct,
+        "max_gain_pct": trade.max_gain_pct,
+        "max_drawdown_pct": trade.max_drawdown_pct,
+        "hold_seconds": trade.hold_seconds,
+    }
+
+
+def _dict_to_trade(d: dict) -> "ScalpTrade":
+    """Convert a dict back to a ScalpTrade."""
+    return ScalpTrade(
+        signal_id=d["signal_id"],
+        symbol=d["symbol"],
+        signal_type=d["signal_type"],
+        trigger=d["trigger"],
+        confidence=d["confidence"],
+        option_symbol=d["option_symbol"],
+        strike=d["strike"],
+        expiry=d["expiry"],
+        delta=d["delta"],
+        dte=d["dte"],
+        entry_time=datetime.fromisoformat(d["entry_time"]) if d["entry_time"] else None,
+        entry_price=d["entry_price"],
+        underlying_at_entry=d["underlying_at_entry"],
+        contracts=d["contracts"],
+        exit_time=datetime.fromisoformat(d["exit_time"]) if d["exit_time"] else None,
+        exit_price=d["exit_price"],
+        underlying_at_exit=d["underlying_at_exit"],
+        exit_reason=d["exit_reason"],
+        pnl_dollars=d["pnl_dollars"],
+        pnl_pct=d["pnl_pct"],
+        max_gain_pct=d["max_gain_pct"],
+        max_drawdown_pct=d["max_drawdown_pct"],
+        hold_seconds=d["hold_seconds"],
+    )
 
 
 @dataclass
@@ -484,6 +622,8 @@ class ScalpBacktester:
 
                 # New trading day - clear quote cache to prevent stale/expired options
                 self._current_quote.clear()
+                # Reset technical indicators (clears accumulated S/R levels)
+                self.generator.technical.reset_session()
                 self._current_day = current_date
             trading_days.add(current_date)
 
@@ -545,10 +685,170 @@ class ScalpBacktester:
                 self._high_water_mark = self._current_equity
 
         # Calculate statistics
+        print(f"Trade processing complete. {len(self._trades)} trades executed.")
         result = self._calculate_statistics(start_date, end_date, len(trading_days))
         logger.info(f"Backtest complete: {len(self._trades)} trades")
 
         return result
+
+    def run_parallel(
+        self,
+        start_date: date,
+        end_date: date,
+        data_dir: Path,
+        second_bar_cache: Path | None = None,
+        symbol: str = "TSLA",
+        num_workers: int | None = None,
+        on_day_complete: Callable[[date, int, int], None] | None = None,
+    ) -> BacktestResult:
+        """Run backtest with parallel day processing.
+
+        Each day is processed by a separate worker process for ~4-8x speedup.
+        Results are merged and portfolio metrics calculated at the end.
+
+        Args:
+            start_date: First date (inclusive)
+            end_date: Last date (inclusive)
+            data_dir: Path to OPRA data directory
+            second_bar_cache: Path to second bar cache directory
+            symbol: Underlying symbol (default TSLA)
+            num_workers: Number of parallel workers (default: CPU count)
+            on_day_complete: Callback(date, completed_count, total_days)
+
+        Returns:
+            BacktestResult with all trades and statistics
+        """
+        import time as _time
+
+        # Get list of trading days from the loader
+        all_dates = self.replay.loader.get_available_dates()
+        trading_days = [d for d in all_dates if start_date <= d <= end_date]
+        total_days = len(trading_days)
+
+        if total_days == 0:
+            print("No trading days in range")
+            return self._calculate_statistics(start_date, end_date, 0)
+
+        # Determine number of workers
+        if num_workers is None:
+            num_workers = min(mp.cpu_count(), total_days)
+
+        print(f"Running parallel backtest: {total_days} days across {num_workers} workers")
+
+        # Prepare worker arguments
+        # Convert configs to dicts for pickling
+        scalp_config_dict = {
+            k: v for k, v in asdict(self.config).items()
+            if not k.startswith("_")
+        }
+        # Handle tuple field separately (not JSON serializable as-is)
+        scalp_config_dict["dte_preference"] = list(self.config.dte_preference)
+
+        portfolio_config_dict = asdict(self.portfolio_config)
+
+        worker_args = [
+            (
+                day,
+                str(data_dir),
+                str(second_bar_cache) if second_bar_cache else None,
+                scalp_config_dict,
+                portfolio_config_dict,
+                symbol,
+            )
+            for day in trading_days
+        ]
+
+        # Process days in parallel
+        start_time = _time.time()
+        all_trade_dicts: list[dict] = []
+        completed = [0]
+
+        def update_progress(result):
+            completed[0] += 1
+            if on_day_complete:
+                # We don't know which day completed, just the count
+                on_day_complete(trading_days[completed[0] - 1], completed[0], total_days)
+            elapsed = _time.time() - start_time
+            if completed[0] < total_days:
+                eta = (elapsed / completed[0]) * (total_days - completed[0])
+                print(f"  Completed {completed[0]}/{total_days} days (ETA: {eta/60:.1f} min)", flush=True)
+            else:
+                print(f"  Completed {completed[0]}/{total_days} days ({elapsed:.1f}s total)", flush=True)
+
+        # Use Pool with imap_unordered for progress updates
+        with mp.Pool(processes=num_workers) as pool:
+            for result in pool.imap_unordered(_process_day_worker, worker_args):
+                all_trade_dicts.extend(result)
+                update_progress(result)
+
+        # Convert trade dicts back to ScalpTrade objects
+        all_trades = [_dict_to_trade(d) for d in all_trade_dicts]
+
+        # Sort trades by entry time
+        all_trades.sort(key=lambda t: t.entry_time or datetime.min)
+
+        print(f"Trade processing complete. {len(all_trades)} trades executed.")
+
+        # Simulate portfolio with merged trades
+        self._trades = all_trades
+        self._simulate_portfolio_from_trades()
+
+        # Calculate statistics
+        result = self._calculate_statistics(start_date, end_date, total_days)
+
+        return result
+
+    def _simulate_portfolio_from_trades(self) -> None:
+        """Simulate portfolio equity from merged trades.
+
+        Updates _current_equity, _daily_equity, _daily_returns based on trades.
+        """
+        self._current_equity = self.portfolio_config.starting_equity
+        self._high_water_mark = self.portfolio_config.starting_equity
+        self._daily_equity = {}
+        self._daily_returns = []
+
+        prev_day_equity = self._current_equity
+        current_day: date | None = None
+
+        for trade in self._trades:
+            trade_date = trade.entry_time.date() if trade.entry_time else None
+
+            # Handle day change
+            if trade_date != current_day:
+                if current_day is not None:
+                    # Record previous day's ending equity
+                    self._daily_equity[current_day.isoformat()] = self._current_equity
+                    if prev_day_equity > 0:
+                        daily_return = (self._current_equity - prev_day_equity) / prev_day_equity * 100
+                        self._daily_returns.append(daily_return)
+                    prev_day_equity = self._current_equity
+                    if self._current_equity > self._high_water_mark:
+                        self._high_water_mark = self._current_equity
+                current_day = trade_date
+
+            # Apply trade P&L
+            # Recalculate contracts using risk-based sizing (same as sequential mode)
+            contracts = self._calculate_position_size(trade.entry_price)
+            # P&L is simply (exit - entry) * contracts * 100
+            # No special handling for puts - we're LONG the option, profit when price rises
+            pnl = (trade.exit_price - trade.entry_price) * contracts * 100
+
+            # Update trade with recalculated values
+            trade.contracts = contracts
+            trade.pnl_dollars = pnl
+            trade.equity_before = self._current_equity
+            self._current_equity += pnl
+            trade.equity_after = self._current_equity
+
+        # Record final day
+        if current_day is not None:
+            self._daily_equity[current_day.isoformat()] = self._current_equity
+            if prev_day_equity > 0:
+                daily_return = (self._current_equity - prev_day_equity) / prev_day_equity * 100
+                self._daily_returns.append(daily_return)
+            if self._current_equity > self._high_water_mark:
+                self._high_water_mark = self._current_equity
 
     def _update_available_options(self, current_time: datetime) -> None:
         """Build options list from current quotes for signal generator.
@@ -862,6 +1162,7 @@ class ScalpBacktester:
         trading_days: int,
     ) -> BacktestResult:
         """Calculate aggregate statistics from trades."""
+        print(f"Calculating statistics for {len(self._trades)} trades...")
         result = BacktestResult(
             start_date=start_date,
             end_date=end_date,
@@ -919,6 +1220,7 @@ class ScalpBacktester:
             dte = trade.dte
             result.trades_by_dte[dte] = result.trades_by_dte.get(dte, 0) + 1
             result.pnl_by_dte[dte] = result.pnl_by_dte.get(dte, 0) + trade.pnl_dollars
+        print("  Trades categorized...")
 
         # Calculate rates
         result.total_pnl = result.gross_profit - result.gross_loss
@@ -970,6 +1272,7 @@ class ScalpBacktester:
             dte_wins = sum(1 for t in dte_trades if t.pnl_dollars > 0)
             if dte_trades:
                 result.winrate_by_dte[dte] = dte_wins / len(dte_trades)
+        print("  Trade metrics calculated...")
 
         # Portfolio metrics
         result.starting_equity = self.portfolio_config.starting_equity
@@ -998,6 +1301,7 @@ class ScalpBacktester:
                     max_dd_pct = drawdown_pct
             result.max_drawdown = max_dd
             result.max_drawdown_pct = max_dd_pct
+        print("  Drawdown calculated...")
 
         # Calculate risk metrics from daily returns
         if self._daily_returns:
@@ -1036,9 +1340,11 @@ class ScalpBacktester:
                 total_return = self._current_equity / self.portfolio_config.starting_equity
                 if total_return > 0:
                     result.cagr = (math.pow(total_return, 1 / years) - 1) * 100
+        print("  Risk metrics calculated...")
 
         # Monthly returns
         result.monthly_returns = self._calculate_monthly_returns()
+        print("  Statistics complete.")
 
         return result
 

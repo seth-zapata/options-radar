@@ -93,6 +93,13 @@ class ScalpConfig:
     # Confidence filter - skip overextended moves (80+ confidence = 33% WR!)
     max_confidence: int = 75  # Cap confidence to avoid mean-reversion losers
 
+    # Signal type toggles - based on backtest analysis
+    # vwap_bounce: 0-10% WR, consistently loses money - DISABLED
+    # vwap_rejection: 12.5% WR, blocks momentum_burst signals - DISABLED
+    # momentum_burst: core strategy - ONLY enabled signal type
+    enable_vwap_bounce: bool = False  # Disable: 0-10% WR, loses money
+    enable_vwap_rejection: bool = False  # Disable: 12.5% WR, blocks momentum_burst
+
     # Risk management - Updated based on backtest analysis
     take_profit_pct: float = 20.0  # Lowered from 30% to capture more winners
     stop_loss_pct: float = 15.0

@@ -173,23 +173,43 @@ def run_backtest(args):
     total_days = len([d for d in available_dates if bt_start <= d <= bt_end])
     days_processed = [0]  # Use list for closure
 
-    def on_day_start(current_date):
-        days_processed[0] += 1
-        elapsed = _time.time() - backtest_start_time
-        if days_processed[0] > 1:
-            avg_per_day = elapsed / (days_processed[0] - 1)
-            remaining_days = total_days - days_processed[0] + 1
-            eta_seconds = avg_per_day * remaining_days
-            eta_min = eta_seconds / 60
-            print(f"  Processing {current_date} ({days_processed[0]}/{total_days}) - ETA: {eta_min:.1f} min", flush=True)
-        else:
-            print(f"  Processing {current_date} ({days_processed[0]}/{total_days})...", flush=True)
+    if getattr(args, 'parallel', False):
+        # Parallel mode - process days concurrently
+        print(f"Using PARALLEL mode with {args.workers or 'auto'} workers")
+        result = backtester.run_parallel(
+            start_date=bt_start,
+            end_date=bt_end,
+            data_dir=data_path,
+            second_bar_cache=second_bar_cache.cache_dir,
+            symbol="TSLA",
+            num_workers=args.workers,
+        )
+    else:
+        # Sequential mode - process days one at a time
+        def on_day_start(current_date):
+            days_processed[0] += 1
+            elapsed = _time.time() - backtest_start_time
+            if days_processed[0] > 1:
+                avg_per_day = elapsed / (days_processed[0] - 1)
+                remaining_days = total_days - days_processed[0] + 1
+                eta_seconds = avg_per_day * remaining_days
+                eta_min = eta_seconds / 60
+                print(f"  Day {days_processed[0]}/{total_days}: {current_date} (ETA: {eta_min:.1f} min remaining)", flush=True)
+            else:
+                print(f"  Day {days_processed[0]}/{total_days}: {current_date} (starting...)", flush=True)
 
-    result = backtester.run(bt_start, bt_end, on_day_start=on_day_start)
+        def on_day_end(current_date, tick_count):
+            elapsed = _time.time() - backtest_start_time
+            print(f"    -> Day complete ({tick_count:,} ticks, {elapsed:.1f}s elapsed)", flush=True)
+
+        result = backtester.run(bt_start, bt_end, on_day_start=on_day_start, on_day_end=on_day_end)
 
     # Print summary
     print()
     print(result.summary())
+
+    # Print lookup debug stats
+    replay.print_lookup_debug_stats()
 
     # Save to file if requested
     if args.output:
@@ -246,6 +266,17 @@ Examples:
     parser.add_argument(
         "--output", "-o",
         help="Output JSON file for backtest results",
+    )
+    parser.add_argument(
+        "--parallel",
+        action="store_true",
+        help="Run backtest with parallel day processing (4-8x faster)",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Number of parallel workers (default: CPU count)",
     )
     parser.add_argument(
         "--speed",

@@ -339,6 +339,15 @@ class ScalpSignalGenerator:
         vwap_signal = self.technical.check_vwap_signal(underlying_price, velocity_pct)
 
         if vwap_signal:
+            # Filter by signal type based on config
+            if vwap_signal.signal_type == "vwap_bounce" and not self.config.enable_vwap_bounce:
+                logger.debug(f"[{self.symbol}] Skipping vwap_bounce (disabled in config)")
+                vwap_signal = None
+            elif vwap_signal.signal_type == "vwap_rejection" and not self.config.enable_vwap_rejection:
+                logger.debug(f"[{self.symbol}] Skipping vwap_rejection (disabled in config)")
+                vwap_signal = None
+
+        if vwap_signal:
             # Apply confidence cap to technical signals too
             if vwap_signal.confidence > self.config.max_confidence:
                 logger.debug(

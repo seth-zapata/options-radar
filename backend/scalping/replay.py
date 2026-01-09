@@ -151,6 +151,32 @@ class QuoteReplaySystem:
         self.second_bar_cache = second_bar_cache
         self._bars_in_memory: dict[datetime, CachedBar] | None = None
         self._second_bars_in_memory: dict[datetime, CachedBar] | None = None
+        self._second_bars_by_date: dict[date, dict[datetime, CachedBar]] | None = None  # Date-indexed for fast fallback
+
+        # Debug counters for lookup performance
+        self._debug_direct_hits = 0
+        self._debug_fallback_searches = 0
+        self._debug_fallback_examples: list[datetime] = []  # First 10 examples
+
+    def print_lookup_debug_stats(self) -> None:
+        """Print debug statistics for lookup performance."""
+        total = self._debug_direct_hits + self._debug_fallback_searches
+        if total == 0:
+            print("No lookups performed")
+            return
+
+        fallback_pct = (self._debug_fallback_searches / total) * 100
+        print(f"\n=== LOOKUP DEBUG STATS ===")
+        print(f"Direct hits (O(1)):    {self._debug_direct_hits:,}")
+        print(f"Fallback searches:     {self._debug_fallback_searches:,}")
+        print(f"Total lookups:         {total:,}")
+        print(f"Fallback rate:         {fallback_pct:.2f}%")
+
+        if self._debug_fallback_examples:
+            print(f"\nExample missed timestamps (first {len(self._debug_fallback_examples)}):")
+            for ts in self._debug_fallback_examples:
+                prev_second = ts.replace(microsecond=0) - timedelta(seconds=1)
+                print(f"  {ts} -> looked for {prev_second}")
 
     def replay_day(
         self,
@@ -191,6 +217,14 @@ class QuoteReplaySystem:
             self._second_bars_in_memory = self.second_bar_cache.load_range_to_memory(
                 symbol, start_date, end_date
             )
+            # Build date-indexed structure for fast fallback lookups
+            if self._second_bars_in_memory:
+                self._second_bars_by_date = {}
+                for ts, bar in self._second_bars_in_memory.items():
+                    d = ts.date()
+                    if d not in self._second_bars_by_date:
+                        self._second_bars_by_date[d] = {}
+                    self._second_bars_by_date[d][ts] = bar
 
         # Also load 1-minute bars as fallback
         if self.bar_cache:
@@ -244,8 +278,9 @@ class QuoteReplaySystem:
     ) -> Iterator[BacktestTick]:
         """Replay quotes as flat BacktestTick objects for backtester.
 
-        This method converts ReplayTick (grouped by timestamp) into
-        individual BacktestTick objects that the backtester expects.
+        This method emits underlying price updates for EVERY 1-second bar,
+        independent of option quote arrival. This ensures the velocity tracker
+        receives consistent price data for accurate momentum detection.
 
         Args:
             start_date: First date (inclusive)
@@ -255,32 +290,95 @@ class QuoteReplaySystem:
             on_day_end: Callback at end of each day with tick count
 
         Yields:
-            BacktestTick for each quote (underlying first, then options)
+            BacktestTick for each 1-second bar AND each option quote
         """
-        for tick in self.replay_range(start_date, end_date, symbol_filter, on_day_start, on_day_end):
-            # First yield underlying price update if available
-            if tick.underlying_price is not None:
-                yield BacktestTick(
-                    timestamp=tick.timestamp,
-                    symbol=symbol_filter or "UND",
-                    is_underlying=True,
-                    mid_price=tick.underlying_price,
-                    bid_price=tick.underlying_price,
-                    ask_price=tick.underlying_price,
-                    volume=None,
-                )
+        # Load bars into memory if not already loaded
+        if self.second_bar_cache and symbol_filter and self._second_bars_in_memory is None:
+            self.load_bars_for_range(symbol_filter, start_date, end_date)
 
-            # Then yield each option quote
-            for quote in tick.quotes:
-                yield BacktestTick(
-                    timestamp=tick.timestamp,
-                    symbol=quote.symbol,
-                    is_underlying=False,
-                    mid_price=quote.mid,
-                    bid_price=quote.bid,
-                    ask_price=quote.ask,
-                    volume=None,
-                )
+        # Phase 1: Collect all option quotes grouped by timestamp (no callbacks here)
+        option_quotes_by_ts: dict[datetime, list[ReplayQuote]] = {}
+
+        for tick in self.replay_range(start_date, end_date, symbol_filter, None, None):
+            option_quotes_by_ts[tick.timestamp] = tick.quotes
+
+        # Now merge 1-second bar timestamps with option quote timestamps
+        all_timestamps: set[datetime] = set(option_quotes_by_ts.keys())
+
+        # Add all 1-second bar timestamps
+        if self._second_bars_in_memory:
+            for ts in self._second_bars_in_memory.keys():
+                # Filter to date range and market hours
+                if ts.date() < start_date or ts.date() > end_date:
+                    continue
+                if self.filter_market_hours:
+                    local_hour = ts.hour - 5  # Rough EST offset from UTC
+                    if local_hour < 9 or local_hour >= 16:
+                        continue
+                all_timestamps.add(ts)
+
+        # Sort all timestamps chronologically
+        sorted_timestamps = sorted(all_timestamps)
+
+        # Track last emitted underlying price to avoid duplicates at same timestamp
+        last_underlying_ts: datetime | None = None
+
+        # Phase 2: Process ticks - callbacks fire here during actual processing
+        current_processing_date: date | None = None
+        tick_count = 0
+
+        for ts in sorted_timestamps:
+            # Track day changes and fire callbacks
+            tick_date = ts.date()
+            if tick_date != current_processing_date:
+                # Fire on_day_end for previous day (if any)
+                if current_processing_date is not None and on_day_end:
+                    on_day_end(current_processing_date, tick_count)
+                # Fire on_day_start for new day
+                current_processing_date = tick_date
+                tick_count = 0
+                if on_day_start:
+                    on_day_start(current_processing_date)
+            # Emit underlying price from 1-second bar (if available)
+            if self._second_bars_in_memory and ts != last_underlying_ts:
+                # Look up price at this timestamp (using previous bar to avoid lookahead)
+                price = self._lookup_second_bar_price(ts)
+                if price is not None:
+                    # Get volume from bar if available
+                    bar_ts = ts.replace(microsecond=0) - timedelta(seconds=1)
+                    volume = None
+                    if bar_ts in self._second_bars_in_memory:
+                        volume = self._second_bars_in_memory[bar_ts].volume
+
+                    yield BacktestTick(
+                        timestamp=ts,
+                        symbol=symbol_filter or "UND",
+                        is_underlying=True,
+                        mid_price=price,
+                        bid_price=price,
+                        ask_price=price,
+                        volume=volume,
+                    )
+                    tick_count += 1
+                    last_underlying_ts = ts
+
+            # Emit option quotes at this timestamp (if any)
+            if ts in option_quotes_by_ts:
+                for quote in option_quotes_by_ts[ts]:
+                    yield BacktestTick(
+                        timestamp=ts,
+                        symbol=quote.symbol,
+                        is_underlying=False,
+                        mid_price=quote.mid,
+                        bid_price=quote.bid,
+                        ask_price=quote.ask,
+                        volume=None,
+                    )
+                    tick_count += 1
+
+        # Fire on_day_end for the last day
+        if current_processing_date is not None and on_day_end:
+            on_day_end(current_processing_date, tick_count)
 
     def _process_dataframe(
         self,
@@ -443,13 +541,23 @@ class QuoteReplaySystem:
         prev_second = timestamp.replace(microsecond=0) - timedelta(seconds=1)
 
         if prev_second in self._second_bars_in_memory:
+            self._debug_direct_hits += 1
             return self._second_bars_in_memory[prev_second].close
 
+        # DEBUG: Track fallback
+        self._debug_fallback_searches += 1
+        if len(self._debug_fallback_examples) < 10:
+            self._debug_fallback_examples.append(timestamp)
+
         # Fallback: find nearest EARLIER bar within 5 seconds
+        # Use date-indexed dict for O(n/days) instead of O(n) - ~246x faster for full year
         best_bar = None
         best_diff = timedelta(seconds=5)
 
-        for ts, bar in self._second_bars_in_memory.items():
+        # Search only within the same day's bars (~23K instead of 5.9M)
+        day_bars = self._second_bars_by_date.get(timestamp.date(), {}) if self._second_bars_by_date else self._second_bars_in_memory
+
+        for ts, bar in day_bars.items():
             if ts >= timestamp:
                 continue
             diff = timestamp - ts

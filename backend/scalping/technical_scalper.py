@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import statistics
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Literal
@@ -30,7 +31,7 @@ class VWAPState:
     vwap: float = 0.0
     upper_band: float = 0.0  # VWAP + 1 std dev
     lower_band: float = 0.0  # VWAP - 1 std dev
-    squared_deviations: list[float] = field(default_factory=list)
+    squared_deviations: deque[float] = field(default_factory=lambda: deque(maxlen=100))
 
 
 @dataclass
@@ -121,8 +122,9 @@ class TechnicalScalper:
         # VWAP state
         self._vwap = VWAPState()
 
-        # Price history for S/R calculation
-        self._price_history: list[tuple[float, datetime]] = []
+        # Price history for S/R calculation (60 min * 60 sec = 3600 max entries)
+        # Using deque with maxlen for O(1) append with automatic cleanup
+        self._price_history: deque[tuple[float, datetime]] = deque(maxlen=3600)
 
         # Detected levels
         self._support_levels: list[SupportResistance] = []
@@ -172,9 +174,8 @@ class TechnicalScalper:
         # Update VWAP
         self._update_vwap(price, volume)
 
-        # Store price history
+        # Store price history (deque auto-removes oldest when full)
         self._price_history.append((price, timestamp))
-        self._cleanup_old_prices(timestamp)
 
         # Periodically update S/R levels (every 10 ticks to reduce overhead)
         if len(self._price_history) % 10 == 0:
@@ -191,13 +192,9 @@ class TechnicalScalper:
         if self._vwap.cumulative_volume > 0:
             self._vwap.vwap = self._vwap.cumulative_pv / self._vwap.cumulative_volume
 
-            # Track squared deviation for std calculation
+            # Track squared deviation for std calculation (deque auto-trims to 100)
             deviation = price - self._vwap.vwap
             self._vwap.squared_deviations.append(deviation**2)
-
-            # Keep last 100 for rolling std
-            if len(self._vwap.squared_deviations) > 100:
-                self._vwap.squared_deviations = self._vwap.squared_deviations[-100:]
 
             # Calculate bands
             if len(self._vwap.squared_deviations) >= 2:
@@ -206,11 +203,6 @@ class TechnicalScalper:
                 std = variance**0.5
                 self._vwap.upper_band = self._vwap.vwap + (std * self.vwap_band_std)
                 self._vwap.lower_band = self._vwap.vwap - (std * self.vwap_band_std)
-
-    def _cleanup_old_prices(self, current_time: datetime) -> None:
-        """Remove prices older than lookback period."""
-        cutoff = current_time - timedelta(minutes=self.sr_lookback_minutes)
-        self._price_history = [(p, t) for p, t in self._price_history if t >= cutoff]
 
     def _update_sr_levels(self, current_time: datetime) -> None:
         """Update support/resistance levels from price history."""
