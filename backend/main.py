@@ -1220,15 +1220,37 @@ async def lifespan(app: FastAPI):
     try:
         if config.scalping.enabled:
             SCALPING_ENABLED = True
+            # Optimized config from 2024-2025 backtest validation:
+            # - momentum_burst only (vwap signals disabled)
+            # - DTE preference: 1 > 2 > 3 (never 0DTE)
+            # - Confidence cap at 75 (80+ has 33% WR - overextended)
+            # - Time stop at 5 min for unprofitable trades
+            # - Take profit lowered to 20% to capture more winners
             scalp_config = ScalpConfig(
                 enabled=True,
-                # Use sensible defaults - can be overridden via env vars later
+                # Signal generation
                 momentum_threshold_pct=0.5,
+                momentum_window_seconds=30,
                 volume_spike_ratio=1.5,
-                take_profit_pct=30.0,
+                # Signal type toggles - only momentum_burst enabled
+                enable_vwap_bounce=False,  # 0-10% WR - disabled
+                enable_vwap_rejection=False,  # 12.5% WR - disabled
+                # DTE filtering
+                min_dte=1,  # Never 0DTE
+                max_dte=3,
+                dte_preference=(1, 2, 3),  # DTE=1 has 45% WR
+                # Confidence cap - skip overextended moves
+                max_confidence=75,  # 80+ has 33% WR
+                # Price filtering
+                max_contract_price=3.00,  # Winners avg $2.86 entry
+                # Risk management
+                take_profit_pct=20.0,  # Lowered from 30%
                 stop_loss_pct=15.0,
-                max_hold_minutes=15,
+                max_hold_minutes=None,  # Allow overnight holds
+                time_stop_minutes=5,  # Exit unprofitable after 5 min
+                # Position limits
                 max_daily_scalps=10,
+                max_concurrent_scalps=1,
             )
             scalp_volume_analyzer = VolumeAnalyzer()
 

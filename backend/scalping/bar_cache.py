@@ -513,26 +513,69 @@ class SecondBarCache:
 
         return bars
 
+    async def _fetch_and_cache_single_day(
+        self,
+        symbol: str,
+        target_date: date,
+        semaphore: asyncio.Semaphore,
+        progress: dict,
+    ) -> bool:
+        """Fetch and cache a single day with semaphore for rate limiting.
+
+        Args:
+            symbol: Stock symbol
+            target_date: Date to fetch
+            semaphore: Semaphore for limiting concurrent requests
+            progress: Shared dict for progress tracking
+
+        Returns:
+            True if successful, False otherwise
+        """
+        async with semaphore:
+            progress["started"] += 1
+            idx = progress["started"]
+            total = progress["total"]
+
+            try:
+                trades = await self._fetch_trades_for_day(symbol, target_date)
+
+                if not trades:
+                    print(f"  [{idx}/{total}] {target_date}: no trades (holiday?)")
+                    return False
+
+                bars = self._aggregate_trades_to_second_bars(trades)
+                self._save_cached_date(symbol, target_date, bars, len(trades))
+
+                progress["completed"] += 1
+                print(f"  [{idx}/{total}] {target_date}: {len(trades):,} trades -> {len(bars):,} bars")
+                return True
+
+            except Exception as e:
+                print(f"  [{idx}/{total}] {target_date}: ERROR: {e}")
+                return False
+
     async def fetch_and_cache_range(
         self,
         symbol: str,
         start_date: date,
         end_date: date,
         force_refresh: bool = False,
+        max_concurrent: int = 8,
     ) -> int:
         """Fetch trades and cache as 1-second bars for a date range.
+
+        Uses parallel fetching with a semaphore to limit concurrent API requests.
 
         Args:
             symbol: Stock symbol (e.g., "TSLA")
             start_date: Start date (inclusive)
             end_date: End date (inclusive)
             force_refresh: If True, re-fetch even if cached
+            max_concurrent: Maximum concurrent API requests (default: 8)
 
         Returns:
             Number of dates fetched (not cached)
         """
-        dates_fetched = 0
-
         # Find dates that need fetching
         current = start_date
         dates_to_fetch: list[date] = []
@@ -548,33 +591,22 @@ class SecondBarCache:
             print(f"All {symbol} 1-second bars already cached for {start_date} to {end_date}")
             return 0
 
-        print(f"Fetching 1-second bars for {len(dates_to_fetch)} days of {symbol}...")
+        print(f"Fetching 1-second bars for {len(dates_to_fetch)} days of {symbol} ({max_concurrent} concurrent)...")
 
-        # Fetch each day individually (trades are date-specific)
-        for i, target_date in enumerate(dates_to_fetch):
-            print(f"  [{i+1}/{len(dates_to_fetch)}] {target_date}...", end=" ", flush=True)
+        # Use semaphore to limit concurrent requests
+        semaphore = asyncio.Semaphore(max_concurrent)
+        progress = {"started": 0, "completed": 0, "total": len(dates_to_fetch)}
 
-            try:
-                trades = await self._fetch_trades_for_day(symbol, target_date)
+        # Fetch all days in parallel (limited by semaphore)
+        tasks = [
+            self._fetch_and_cache_single_day(symbol, target_date, semaphore, progress)
+            for target_date in dates_to_fetch
+        ]
 
-                if not trades:
-                    print("no trades (holiday?)")
-                    continue
+        results = await asyncio.gather(*tasks)
+        dates_fetched = sum(1 for r in results if r)
 
-                bars = self._aggregate_trades_to_second_bars(trades)
-                self._save_cached_date(symbol, target_date, bars, len(trades))
-                dates_fetched += 1
-
-                print(f"{len(trades):,} trades -> {len(bars):,} bars")
-
-            except Exception as e:
-                print(f"ERROR: {e}")
-                continue
-
-            # Delay between days to be nice to API
-            if i < len(dates_to_fetch) - 1:
-                await asyncio.sleep(0.5)
-
+        print(f"Completed: {dates_fetched}/{len(dates_to_fetch)} days cached successfully")
         return dates_fetched
 
     def load_range_to_memory(
