@@ -18,9 +18,10 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
+from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
     from backend.data.alpaca_trader import AlpacaTrader, OrderResult
@@ -272,6 +273,10 @@ class ScalpExitResult:
         }
 
 
+# Eastern timezone for market hours
+ET = ZoneInfo("America/New_York")
+
+
 @dataclass
 class ScalpExecutorConfig:
     """Configuration for scalp execution."""
@@ -282,6 +287,8 @@ class ScalpExecutorConfig:
     use_limit_orders: bool = True
     limit_offset_pct: float = 0.5  # Offset from mid for limit orders
     slippage_pct: float = 0.5  # Expected slippage for P&L calculations
+    # Market close exit - force close positions before market closes to ensure fill
+    market_close_exit_minutes: int = 5  # Exit 5 minutes before 4pm ET (at 3:55 PM)
 
 
 class ScalpExecutor:
@@ -359,6 +366,9 @@ class ScalpExecutor:
         # Trade log directory
         self._trade_log_dir = Path("scalp_trades")
         self._trade_log_dir.mkdir(exist_ok=True)
+
+        # Market close exit tracking (prevent duplicate close attempts)
+        self._market_close_triggered_date: date | None = None
 
     def _get_trade_log_path(self) -> Path:
         """Get path to today's trade log file."""
@@ -870,6 +880,25 @@ class ScalpExecutor:
     async def _check_exits(self) -> None:
         """Check all open positions for exit conditions."""
         if not self._positions:
+            return
+
+        # Check for market close - force exit all positions before close
+        now_et = datetime.now(ET)
+        today = now_et.date()
+        market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        cutoff_time = market_close - timedelta(minutes=self.config.market_close_exit_minutes)
+
+        # Only trigger market close exit once per day
+        if (now_et >= cutoff_time and now_et.weekday() < 5
+            and self._market_close_triggered_date != today):
+            # Force close all positions before market closes
+            self._market_close_triggered_date = today
+            minutes_to_close = (market_close - now_et).total_seconds() / 60
+            logger.warning(
+                f"[SCALP-EXIT] Market closing in {minutes_to_close:.1f} min - "
+                f"force closing {len(self._positions)} position(s)"
+            )
+            await self.force_close_all("market_close")
             return
 
         # Get current prices from trader
