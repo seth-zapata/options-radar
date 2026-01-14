@@ -148,32 +148,61 @@ class ORATSClient:
         results = []
         for item in data.get("data", []):
             # Filter by strikes if specified
-            strike = item.get("strike")
+            # Round to 2 decimal places to match Alpaca's integer-based strike parsing
+            strike = round(item.get("strike", 0), 2)
             if strikes and strike not in strikes:
                 continue
 
-            # Build canonical ID
-            right = "C" if item.get("callPut") == "call" else "P"
-            canonical_id = CanonicalOptionId(
+            expiry_date = item.get("expirDate", expiry)
+            item_timestamp = item.get("updatedAt", timestamp)
+            # ORATS returns smoothed IV (smvVol) which is more stable
+            iv = item.get("smvVol", item.get("iv", 0.0))
+
+            # ORATS /live/strikes returns BOTH call and put data per record
+            # Fields are prefixed: callDelta/putDelta, callGamma/putGamma, etc.
+            # Create two GreeksData entries - one for call, one for put
+
+            # Call option
+            call_id = CanonicalOptionId(
                 underlying=ticker,
-                expiry=item.get("expirDate", expiry),
-                right=right,
+                expiry=expiry_date,
+                right="C",
                 strike=strike,
             )
-
-            greeks = GreeksData(
-                canonical_id=canonical_id,
-                delta=item.get("delta", 0.0),
-                gamma=item.get("gamma", 0.0),
-                theta=item.get("theta", 0.0),
-                vega=item.get("vega", 0.0),
-                rho=item.get("rho", 0.0),
-                iv=item.get("smvVol", item.get("iv", 0.0)),  # smvVol is smoothed IV
-                theoretical_value=item.get("callValue" if right == "C" else "putValue", 0.0),
-                timestamp=item.get("updatedAt", timestamp),
+            call_greeks = GreeksData(
+                canonical_id=call_id,
+                delta=item.get("callDelta", item.get("delta", 0.0)),
+                gamma=item.get("callGamma", item.get("gamma", 0.0)),
+                theta=item.get("callTheta", item.get("theta", 0.0)),
+                vega=item.get("callVega", item.get("vega", 0.0)),
+                rho=item.get("callRho", item.get("rho", 0.0)),
+                iv=iv,
+                theoretical_value=item.get("callValue", 0.0),
+                timestamp=item_timestamp,
                 source="orats",
             )
-            results.append(greeks)
+            results.append(call_greeks)
+
+            # Put option
+            put_id = CanonicalOptionId(
+                underlying=ticker,
+                expiry=expiry_date,
+                right="P",
+                strike=strike,
+            )
+            put_greeks = GreeksData(
+                canonical_id=put_id,
+                delta=item.get("putDelta", item.get("delta", 0.0)),
+                gamma=item.get("putGamma", item.get("gamma", 0.0)),
+                theta=item.get("putTheta", item.get("theta", 0.0)),
+                vega=item.get("putVega", item.get("vega", 0.0)),
+                rho=item.get("putRho", item.get("rho", 0.0)),
+                iv=iv,
+                theoretical_value=item.get("putValue", 0.0),
+                timestamp=item_timestamp,
+                source="orats",
+            )
+            results.append(put_greeks)
 
         logger.debug(f"Fetched {len(results)} Greeks for {ticker} {expiry}")
         return results

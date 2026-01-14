@@ -118,7 +118,8 @@ class ConnectionManager:
             try:
                 await websocket.send_text(data)
             except Exception as e:
-                logger.warning(f"Failed to send to client: {e}")
+                # Demote to debug - client disconnects are normal and not actionable
+                logger.debug(f"Failed to send to client: {e}")
                 disconnected.append(websocket)
 
         # Clean up disconnected clients
@@ -189,5 +190,6 @@ class ConnectionManager:
             await websocket.send_text(json.dumps(message))
             return True
         except Exception as e:
-            logger.warning(f"Failed to send to client: {e}")
+            # Demote to debug - client disconnects are normal and not actionable
+            logger.debug(f"Failed to send to client: {e}")
             return False

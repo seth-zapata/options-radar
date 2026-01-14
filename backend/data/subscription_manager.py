@@ -26,13 +26,14 @@ from backend.models.canonical import CanonicalOptionId, to_alpaca
 logger = logging.getLogger(__name__)
 
 # Standard strike intervals by price range
+# Using $2.50 for $200-500 to match ORATS granularity exactly
 STRIKE_INTERVALS = [
     (0, 50, 1),        # $0-50: $1 strikes
     (50, 100, 2.5),    # $50-100: $2.50 strikes
-    (100, 200, 5),     # $100-200: $5 strikes
-    (200, 500, 10),    # $200-500: $10 strikes
-    (500, 1000, 25),   # $500-1000: $25 strikes
-    (1000, float('inf'), 50),  # $1000+: $50 strikes
+    (100, 200, 2.5),   # $100-200: $2.50 strikes
+    (200, 500, 2.5),   # $200-500: $2.50 strikes (matches ORATS exactly)
+    (500, 1000, 5),    # $500-1000: $5 strikes
+    (1000, float('inf'), 10),  # $1000+: $10 strikes
 ]
 
 
@@ -50,26 +51,38 @@ def round_to_strike(price: float, interval: float) -> float:
 
 
 def get_expiration_buckets(from_date: date | None = None) -> list[date]:
-    """Get expiration dates for the two buckets: nearest weekly + ~45 DTE.
+    """Get expiration dates for scalping: near-term (0-7 DTE) + ~45 DTE.
+
+    For TSLA and other major tickers with Mon/Wed/Fri expirations,
+    we want to capture all near-term expirations for scalping.
 
     Args:
         from_date: Reference date (defaults to today)
 
     Returns:
-        List of two expiration dates [nearest_weekly, ~45_dte]
+        List of expiration dates (near-term + monthly)
     """
     if from_date is None:
         from_date = date.today()
 
     expirations = []
 
-    # Find nearest Friday (weekly expiration)
+    # For scalping, add ALL expirations in the next 7 days
+    # TSLA has Mon/Wed/Fri expirations
+    for days_ahead in range(0, 8):
+        exp_date = from_date + timedelta(days=days_ahead)
+        weekday = exp_date.weekday()
+        # Mon=0, Wed=2, Fri=4 are typical TSLA expiration days
+        if weekday in (0, 2, 4):
+            expirations.append(exp_date)
+
+    # Also add nearest Friday if not already included
     days_until_friday = (4 - from_date.weekday()) % 7
     if days_until_friday == 0:
-        # If today is Friday and market is open, use today; otherwise next Friday
         days_until_friday = 7
     nearest_friday = from_date + timedelta(days=days_until_friday)
-    expirations.append(nearest_friday)
+    if nearest_friday not in expirations:
+        expirations.append(nearest_friday)
 
     # Find ~45 DTE expiration (monthly, typically 3rd Friday)
     target_45dte = from_date + timedelta(days=45)
@@ -87,7 +100,13 @@ def get_expiration_buckets(from_date: date | None = None) -> list[date]:
         first_friday = first_of_next + timedelta(days=(4 - first_of_next.weekday()) % 7)
         third_friday = first_friday + timedelta(days=14)
 
-    expirations.append(third_friday)
+    if third_friday not in expirations:
+        expirations.append(third_friday)
+
+    # Sort by date
+    expirations.sort()
+
+    logger.info(f"Subscription expirations: {[e.isoformat() for e in expirations]}")
 
     return expirations
 

@@ -144,6 +144,8 @@ scalp_signal_generators: dict[str, ScalpSignalGenerator] = {}  # Per-symbol gene
 scalp_config: ScalpConfig | None = None
 scalp_executor: ScalpExecutor | None = None  # Scalp execution and exit monitoring
 SCALPING_ENABLED = False  # Master enable from config
+SCALP_WARMUP_SECONDS = 30  # Wait this long after startup before firing signals
+scalp_start_time: datetime | None = None  # When scalping module started
 
 # Auto-execution components (paper trading only)
 alpaca_trader: AlpacaTrader | MockAlpacaTrader | None = None
@@ -555,6 +557,11 @@ async def gate_evaluation_loop() -> None:
                 if not all_options or not underlying:
                     continue
 
+                # DIAGNOSTIC: Warn if underlying price is 0 or stale
+                if not underlying.price or underlying.price <= 0:
+                    logger.warning(f"[SCALP] {symbol} underlying price is {underlying.price} - data issue!")
+                    continue
+
                 # Fetch sentiment data for this symbol
                 sentiment = None
                 try:
@@ -709,37 +716,101 @@ async def gate_evaluation_loop() -> None:
                         velocity_tracker = scalp_velocity_trackers[symbol]
                         technical_scalper = scalp_technical_scalpers[symbol]
 
+                        # CRITICAL: Skip if underlying price is invalid (causes -100% velocity bug)
+                        if not underlying.price or underlying.price <= 0:
+                            logger.warning(f"[SCALP] Skipping {symbol}: invalid underlying price {underlying.price}")
+                            continue
+
+                        # Check warmup period - need time to build velocity baseline
+                        if scalp_start_time:
+                            elapsed = (now - scalp_start_time).total_seconds()
+                            if elapsed < SCALP_WARMUP_SECONDS:
+                                # Still in warmup - update trackers but don't evaluate signals
+                                velocity_tracker.add_price(underlying.price, now)
+                                if int(elapsed) % 10 == 0:
+                                    logger.info(f"[SCALP] Warmup: {SCALP_WARMUP_SECONDS - int(elapsed)}s remaining")
+                                continue
+
                         # Update velocity tracker with current price
                         velocity_tracker.add_price(underlying.price, now)
+
+                        # Get velocity for signal generation
+                        velocity = velocity_tracker.get_velocity(scalp_config.momentum_window_seconds)
+
+                        # Log velocity every 10 seconds for threshold tuning
+                        if velocity and int(now.timestamp()) % 10 == 0:
+                            v_pct = velocity.change_pct
+                            trigger = "✓ TRIGGER" if abs(v_pct) >= scalp_config.momentum_threshold_pct else ""
+                            logger.info(
+                                f"[SCALP-DIAG] {symbol} ${underlying.price:.2f} | "
+                                f"velocity={v_pct:+.3f}% ({velocity.data_points}pts/{scalp_config.momentum_window_seconds}s) "
+                                f"threshold={scalp_config.momentum_threshold_pct}% {trigger}"
+                            )
 
                         # Update technical scalper (VWAP, S/R levels)
                         # Use option volume as proxy for underlying volume
                         total_volume = sum(o.volume or 0 for o in all_options)
                         technical_scalper.update(underlying.price, volume=total_volume, timestamp=now)
 
-                        # Build available options list for scalping (0-1 DTE only)
+                        # Build available options list for scalping (use config DTE range)
+                        # Track what we're filtering for diagnostics
                         today = now.date()
-                        tomorrow = today + timedelta(days=1)
                         scalp_options = []
+                        filter_stats = {
+                            "total": 0, "wrong_dte": 0, "no_greeks": 0,
+                            "no_quote": 0, "bad_bid": 0, "included": 0,
+                        }
                         for o in all_options:
                             try:
+                                filter_stats["total"] += 1
                                 exp_date = datetime.strptime(o.canonical_id.expiry, "%Y-%m-%d").date()
                                 dte = (exp_date - today).days
-                                if dte <= 1:  # 0DTE or 1DTE only
-                                    scalp_options.append({
-                                        "symbol": f"{symbol}{o.canonical_id.expiry.replace('-', '')[2:]}{o.canonical_id.right}{int(o.canonical_id.strike * 1000):08d}",
-                                        "strike": o.canonical_id.strike,
-                                        "expiry": o.canonical_id.expiry,
-                                        "option_type": o.canonical_id.right,
-                                        "delta": o.delta or 0.5,
-                                        "bid_px": o.bid or 0,
-                                        "ask_px": o.ask or 0,
-                                        "dte": dte,
-                                    })
+
+                                # Check DTE first
+                                if not (scalp_config.min_dte <= dte <= scalp_config.max_dte):
+                                    filter_stats["wrong_dte"] += 1
+                                    continue
+                                # Need Greeks for delta
+                                if not o.has_greeks:
+                                    filter_stats["no_greeks"] += 1
+                                    continue
+                                # Need quotes for execution
+                                if not o.has_quote:
+                                    filter_stats["no_quote"] += 1
+                                    continue
+                                # Need valid bid/ask
+                                if not o.bid or not o.ask or o.bid <= 0:
+                                    filter_stats["bad_bid"] += 1
+                                    continue
+
+                                filter_stats["included"] += 1
+                                scalp_options.append({
+                                    "symbol": f"{symbol}{o.canonical_id.expiry.replace('-', '')[2:]}{o.canonical_id.right}{int(o.canonical_id.strike * 1000):08d}",
+                                    "strike": o.canonical_id.strike,
+                                    "expiry": o.canonical_id.expiry,
+                                    "option_type": o.canonical_id.right,
+                                    "delta": o.delta,
+                                    "bid_px": o.bid,
+                                    "ask_px": o.ask,
+                                    "dte": dte,
+                                })
                             except (ValueError, AttributeError):
                                 continue
 
                         generator.update_available_options(scalp_options)
+
+                        # Skip obviously bogus velocity readings (data errors)
+                        if velocity and abs(velocity.change_pct) > 50:
+                            logger.warning(f"[SCALP] Ignoring bogus velocity {velocity.change_pct:+.1f}%")
+                            velocity = None
+
+                        # Log when momentum threshold exceeded
+                        if velocity and abs(velocity.change_pct) >= scalp_config.momentum_threshold_pct:
+                            direction = "PUT" if velocity.change_pct < 0 else "CALL"
+                            logger.info(
+                                f"[SCALP-TRIGGER] {symbol} {direction} momentum={velocity.change_pct:+.2f}% "
+                                f"({len(scalp_options)} options available)"
+                            )
 
                         # Evaluate for scalp signal
                         scalp_signal = generator.evaluate(now, underlying.price)
@@ -762,6 +833,7 @@ async def gate_evaluation_loop() -> None:
                             # Auto-execute the scalp signal if executor is enabled
                             if scalp_executor and scalp_executor.config.enabled:
                                 try:
+                                    logger.info(f"[SCALP-EXEC] Attempting to execute {scalp_signal.option_symbol}...")
                                     exec_result = await scalp_executor.execute_signal(scalp_signal)
                                     if exec_result.success:
                                         logger.info(
@@ -772,7 +844,13 @@ async def gate_evaluation_loop() -> None:
                                     else:
                                         logger.warning(f"[SCALP-EXEC] Failed: {exec_result.error}")
                                 except Exception as e:
-                                    logger.error(f"[SCALP-EXEC] Error: {e}")
+                                    logger.error(f"[SCALP-EXEC] Error: {e}", exc_info=True)
+                            else:
+                                logger.warning(
+                                    f"[SCALP-EXEC] Executor not available: "
+                                    f"scalp_executor={scalp_executor is not None}, "
+                                    f"enabled={scalp_executor.config.enabled if scalp_executor else 'N/A'}"
+                                )
 
                     except Exception as e:
                         logger.debug(f"[SCALP] Error evaluating {symbol}: {e}")
@@ -1094,24 +1172,28 @@ async def greeks_polling_loop() -> None:
         logger.warning("ORATS client not configured, skipping Greeks polling")
         return
 
-    logger.info("Starting Greeks polling loop (60s interval)")
+    logger.info("Starting Greeks polling loop (15s interval)")
 
+    first_poll = True
     while True:
         try:
-            await asyncio.sleep(60)  # Poll every 60 seconds
+            if not first_poll:
+                await asyncio.sleep(15)  # Poll every 15 seconds
+            first_poll = False
 
             if not subscription_manager:
                 continue
 
             symbol = subscription_manager.symbol
-            logger.debug(f"Fetching Greeks for {symbol}")
 
             # Fetch Greeks for subscribed options
             greeks_list = await orats_client.fetch_greeks(symbol, "", dte_max=60)
 
             if greeks_list:
                 aggregator.update_greeks_batch(greeks_list)
-                logger.debug(f"Updated {len(greeks_list)} Greeks for {symbol}")
+                logger.debug(f"[GREEKS] Updated {len(greeks_list)} Greeks for {symbol}")
+            else:
+                logger.warning(f"[GREEKS] No Greeks returned from ORATS for {symbol}")
 
             # Fetch IV rank
             iv_data = await orats_client.fetch_iv_rank(symbol)
@@ -1222,32 +1304,33 @@ async def lifespan(app: FastAPI):
             SCALPING_ENABLED = True
             # Optimized config from 2024-2025 backtest validation:
             # - momentum_burst only (vwap signals disabled)
-            # - DTE preference: 1 > 2 > 3 (never 0DTE)
-            # - Confidence cap at 75 (80+ has 33% WR - overextended)
-            # - Time stop at 5 min for unprofitable trades
-            # - Take profit lowered to 20% to capture more winners
+            # INTRA-MINUTE SCALPING CONFIG (aggressive for real-time data)
+            # Tuned for live trading with real-time option quotes:
+            # - Lower momentum threshold (catch moves earlier)
+            # - Lower volume spike (faster confirmation)
+            # - Shorter time stop (exit stalled trades fast)
             scalp_config = ScalpConfig(
                 enabled=True,
-                # Signal generation
-                momentum_threshold_pct=0.5,
-                momentum_window_seconds=30,
-                volume_spike_ratio=1.5,
+                # Signal generation - test config for more signals
+                momentum_threshold_pct=0.25,  # Lower threshold
+                momentum_window_seconds=60,  # Longer window to capture momentum
+                volume_spike_ratio=1.3,  # Down from 1.5 (faster confirmation)
                 # Signal type toggles - only momentum_burst enabled
                 enable_vwap_bounce=False,  # 0-10% WR - disabled
                 enable_vwap_rejection=False,  # 12.5% WR - disabled
                 # DTE filtering
                 min_dte=1,  # Never 0DTE
-                max_dte=3,
-                dte_preference=(1, 2, 3),  # DTE=1 has 45% WR
+                max_dte=5,  # Allow up to 5 DTE to catch Friday expirations
+                dte_preference=(1, 2, 3, 4, 5),  # Prefer shorter DTE
                 # Confidence cap - skip overextended moves
                 max_confidence=75,  # 80+ has 33% WR
                 # Price filtering
                 max_contract_price=3.00,  # Winners avg $2.86 entry
                 # Risk management
-                take_profit_pct=20.0,  # Lowered from 30%
+                take_profit_pct=20.0,
                 stop_loss_pct=15.0,
                 max_hold_minutes=None,  # Allow overnight holds
-                time_stop_minutes=5,  # Exit unprofitable after 5 min
+                time_stop_minutes=2,  # Down from 5 (fast exit on stalled moves)
                 # Position limits
                 max_daily_scalps=10,
                 max_concurrent_scalps=1,
@@ -1267,64 +1350,24 @@ async def lifespan(app: FastAPI):
                     technical_scalper=scalp_technical_scalpers[symbol],
                 )
 
+            # Set warmup start time
+            global scalp_start_time
+            scalp_start_time = datetime.now(timezone.utc)
+
             logger.info("=" * 60)
-            logger.info("SCALPING MODULE ENABLED")
+            logger.info("SCALPING MODULE ENABLED (intra-minute mode)")
             logger.info(f"  Symbols: {scalping_symbols}")
-            logger.info(f"  Momentum threshold: {scalp_config.momentum_threshold_pct}%")
-            logger.info(f"  Take profit: {scalp_config.take_profit_pct}%")
-            logger.info(f"  Stop loss: {scalp_config.stop_loss_pct}%")
-            logger.info(f"  Max hold: {scalp_config.max_hold_minutes} minutes")
+            logger.info(f"  Momentum threshold: {scalp_config.momentum_threshold_pct}% in {scalp_config.momentum_window_seconds}s")
+            logger.info(f"  Volume spike: {scalp_config.volume_spike_ratio}x baseline")
+            logger.info(f"  Take profit: {scalp_config.take_profit_pct}% / Stop loss: {scalp_config.stop_loss_pct}%")
+            logger.info(f"  Time stop: {scalp_config.time_stop_minutes} min (exit stalled trades)")
+            logger.info(f"  Warmup: {SCALP_WARMUP_SECONDS}s (no signals until warmup complete)")
             logger.info("=" * 60)
     except Exception as e:
         logger.warning(f"Could not initialize scalping module: {e}")
         SCALPING_ENABLED = False
 
-    # Initialize scalp executor if scalping and trading are both enabled
-    global scalp_executor
-    if SCALPING_ENABLED and alpaca_trader:
-        try:
-            # Callbacks for WebSocket broadcasts
-            async def on_scalp_execution(result: ScalpExecutionResult):
-                """Broadcast scalp position opened."""
-                await connection_manager.broadcast({
-                    "type": "scalp_position_opened",
-                    "data": result.to_dict(),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
-
-            async def on_scalp_exit(result: ScalpExitResult):
-                """Broadcast scalp position closed."""
-                await connection_manager.broadcast({
-                    "type": "scalp_position_closed",
-                    "data": result.to_dict(),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
-
-            async def on_scalp_update(position: ScalpPosition):
-                """Broadcast scalp position update."""
-                await connection_manager.broadcast({
-                    "type": "scalp_position_update",
-                    "data": position.to_dict(),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
-
-            scalp_executor = ScalpExecutor(
-                trader=alpaca_trader,
-                config=ScalpExecutorConfig(
-                    enabled=True,
-                    max_concurrent_scalps=1,  # One scalp at a time
-                    exit_check_interval=0.5,  # Check every 500ms
-                ),
-                on_execution=on_scalp_execution,
-                on_exit=on_scalp_exit,
-                on_update=on_scalp_update,
-            )
-
-            # Start exit monitoring
-            await scalp_executor.start_exit_monitor()
-            logger.info("[SCALP-EXEC] Scalp executor initialized with exit monitoring")
-        except Exception as e:
-            logger.warning(f"Could not initialize scalp executor: {e}")
+    # NOTE: Scalp executor is initialized AFTER alpaca_trader (see below around line 1700)
 
     # Check for mock mode
     if MOCK_MODE:
@@ -1655,6 +1698,56 @@ async def lifespan(app: FastAPI):
         if config.auto_execution.enabled or SIMULATION_MODE:
             await auto_executor.start_exit_monitor()
             logger.info("Exit monitor started")
+
+        # Initialize scalp executor if scalping is enabled (AFTER alpaca_trader is created)
+        global scalp_executor
+        if SCALPING_ENABLED and alpaca_trader:
+            try:
+                # Callbacks for WebSocket broadcasts
+                async def on_scalp_execution(result: ScalpExecutionResult):
+                    """Broadcast scalp position opened."""
+                    await connection_manager.broadcast({
+                        "type": "scalp_position_opened",
+                        "data": result.to_dict(),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+
+                async def on_scalp_exit(result: ScalpExitResult):
+                    """Broadcast scalp position closed."""
+                    await connection_manager.broadcast({
+                        "type": "scalp_position_closed",
+                        "data": result.to_dict(),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+
+                async def on_scalp_update(position: ScalpPosition):
+                    """Broadcast scalp position update."""
+                    await connection_manager.broadcast({
+                        "type": "scalp_position_update",
+                        "data": position.to_dict(),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+
+                scalp_executor = ScalpExecutor(
+                    trader=alpaca_trader,
+                    config=ScalpExecutorConfig(
+                        enabled=True,
+                        max_concurrent_scalps=1,  # One scalp at a time
+                        exit_check_interval=0.5,  # Check every 500ms
+                    ),
+                    on_execution=on_scalp_execution,
+                    on_exit=on_scalp_exit,
+                    on_update=on_scalp_update,
+                    # Pass velocity trackers for momentum reversal exits
+                    velocity_trackers=scalp_velocity_trackers,
+                    momentum_window_seconds=scalp_config.momentum_window_seconds,
+                )
+
+                # Start exit monitoring for scalps
+                await scalp_executor.start_exit_monitor()
+                logger.info("[SCALP-EXEC] Scalp executor initialized with exit monitoring")
+            except Exception as e:
+                logger.warning(f"Could not initialize scalp executor: {e}")
 
         # Initialize SimulationController for simulation mode
         if SIMULATION_MODE:
@@ -2413,6 +2506,148 @@ async def get_trading_status() -> dict[str, Any]:
         "simulation_mode": SIMULATION_MODE,
         "scalping_enabled": SCALPING_ENABLED,
         **auto_executor.get_status(),
+    }
+
+
+@app.get("/api/scalp/debug")
+async def get_scalp_debug() -> dict[str, Any]:
+    """Debug endpoint: Show current scalping options state.
+
+    Returns all options data available for scalping with quotes and Greeks.
+    """
+    if not SCALPING_ENABLED:
+        return {"error": "Scalping not enabled"}
+
+    symbol = "TSLA"
+    today = datetime.now(timezone.utc).date()
+
+    # Get all options from aggregator
+    if not aggregator:
+        return {"error": "Aggregator not initialized"}
+
+    all_options = aggregator.get_options_for_underlying(symbol)
+
+    # Debug: Check quote vs greeks canonical ID mismatch
+    quote_ids = set(aggregator._quotes.keys())
+    greeks_ids = set(aggregator._greeks.keys())
+    quotes_only = quote_ids - greeks_ids
+    greeks_only = greeks_ids - quote_ids
+    matched = quote_ids & greeks_ids
+
+    # Sample mismatches
+    quote_samples = [str(q) for q in list(quotes_only)[:3]]
+    greek_samples = [str(g) for g in list(greeks_only)[:3]]
+
+    # Detailed expiry breakdown
+    quote_expiries = {}
+    for q in quote_ids:
+        exp = q.expiry
+        if exp not in quote_expiries:
+            quote_expiries[exp] = 0
+        quote_expiries[exp] += 1
+
+    greek_expiries = {}
+    for g in greeks_ids:
+        exp = g.expiry
+        if exp not in greek_expiries:
+            greek_expiries[exp] = 0
+        greek_expiries[exp] += 1
+
+    # Show which quote expiries have Greeks
+    expiry_match_debug = {}
+    for exp, count in sorted(quote_expiries.items()):
+        greeks_for_exp = greek_expiries.get(exp, 0)
+        matched_for_exp = len([q for q in matched if q.expiry == exp])
+        # Check call vs put breakdown
+        quotes_calls = len([q for q in quote_ids if q.expiry == exp and q.right == "C"])
+        quotes_puts = len([q for q in quote_ids if q.expiry == exp and q.right == "P"])
+        matched_calls = len([q for q in matched if q.expiry == exp and q.right == "C"])
+        matched_puts = len([q for q in matched if q.expiry == exp and q.right == "P"])
+        greeks_calls = len([g for g in greeks_ids if g.expiry == exp and g.right == "C"])
+        greeks_puts = len([g for g in greeks_ids if g.expiry == exp and g.right == "P"])
+        expiry_match_debug[exp] = {
+            "quotes": count,
+            "greeks_available": greeks_for_exp,
+            "matched": matched_for_exp,
+            "calls": {"quotes": quotes_calls, "greeks": greeks_calls, "matched": matched_calls},
+            "puts": {"quotes": quotes_puts, "greeks": greeks_puts, "matched": matched_puts},
+        }
+
+    # Get underlying price
+    underlying = aggregator.get_underlying(symbol)
+    underlying_price = underlying.price if underlying else 0
+
+    # Build detailed options list
+    options_by_dte: dict[int, list] = {}
+    for o in all_options:
+        try:
+            exp_date = datetime.strptime(o.canonical_id.expiry, "%Y-%m-%d").date()
+            dte = (exp_date - today).days
+            if dte < 0 or dte > 7:
+                continue
+
+            if dte not in options_by_dte:
+                options_by_dte[dte] = []
+
+            bid = o.bid or 0
+            ask = o.ask or 0
+            mid = (bid + ask) / 2 if bid and ask else 0
+            spread_pct = ((ask - bid) / mid * 100) if mid > 0 else 999
+
+            options_by_dte[dte].append({
+                "expiry": o.canonical_id.expiry,
+                "strike": o.canonical_id.strike,
+                "type": o.canonical_id.right,
+                "delta": round(o.delta, 3) if o.delta else None,
+                "bid": round(bid, 2),
+                "ask": round(ask, 2),
+                "spread_pct": round(spread_pct, 1),
+                "has_quote": o.has_quote,
+                "has_greeks": o.has_greeks,
+            })
+        except (ValueError, AttributeError):
+            continue
+
+    # Sort each DTE bucket by strike
+    for dte in options_by_dte:
+        options_by_dte[dte].sort(key=lambda x: (x["type"], x["strike"]))
+
+    # Summary stats
+    summary = {
+        "underlying_price": underlying_price,
+        "total_options": len(all_options),
+        "by_dte": {dte: len(opts) for dte, opts in sorted(options_by_dte.items())},
+        "subscribed_expirations": [],  # Will be populated below
+    }
+
+    # Get subscription info
+    if subscription_manager:
+        from backend.data.subscription_manager import get_expiration_buckets
+        expirations = get_expiration_buckets(today)
+        summary["subscribed_expirations"] = [e.isoformat() for e in expirations]
+
+    # Filter to show only options with delta 0.35-0.55 (tradeable range)
+    tradeable = {}
+    for dte, opts in options_by_dte.items():
+        tradeable[dte] = [
+            o for o in opts
+            if o["delta"] and 0.30 <= abs(o["delta"]) <= 0.60
+        ]
+
+    return {
+        "summary": summary,
+        "canonical_id_debug": {
+            "quotes_count": len(quote_ids),
+            "greeks_count": len(greeks_ids),
+            "matched_count": len(matched),
+            "quotes_without_greeks": len(quotes_only),
+            "greeks_without_quotes": len(greeks_only),
+            "quote_samples": quote_samples,
+            "greek_samples": greek_samples,
+            "expiry_breakdown": expiry_match_debug,
+        },
+        "tradeable_options": tradeable,  # Delta 0.30-0.60 only
+        "all_options": options_by_dte,  # Everything
     }
 
 

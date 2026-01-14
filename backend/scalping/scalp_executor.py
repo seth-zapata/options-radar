@@ -17,12 +17,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
 if TYPE_CHECKING:
     from backend.data.alpaca_trader import AlpacaTrader, OrderResult
     from backend.data.mock_trader import MockAlpacaTrader
+    from backend.scalping.velocity_tracker import PriceVelocityTracker
 
 from backend.scalping.signal_generator import ScalpSignal
 from backend.scalping.scalp_backtester import ScalpTrade
@@ -58,6 +59,13 @@ class ScalpPosition:
     stop_loss_pct: float
     max_hold_seconds: int
 
+    # Trailing stop config
+    trailing_stop_activation_pct: float = 10.0  # Activate after +10% gain
+    trailing_stop_distance_pct: float = 8.0     # Trail 8% below peak
+
+    # Momentum reversal config
+    entry_velocity_direction: Literal["up", "down"] = "up"  # Direction at entry
+
     # Live state
     current_price: float | None = None
     underlying_price: float | None = None
@@ -65,6 +73,8 @@ class ScalpPosition:
     max_gain_pct: float = 0.0
     max_drawdown_pct: float = 0.0
     last_update: datetime | None = None
+    trailing_stop_active: bool = False  # Whether trailing stop has activated
+    trailing_stop_level_pct: float = 0.0  # Current trail level (% P&L)
 
     # Order tracking
     entry_order_id: str | None = None
@@ -93,12 +103,25 @@ class ScalpPosition:
         """Check if stop loss hit."""
         return self.current_pnl_pct <= -self.stop_loss_pct
 
-    def update_price(self, price: float, underlying: float | None = None) -> str | None:
+    @property
+    def should_exit_trailing_stop(self) -> bool:
+        """Check if trailing stop hit."""
+        if not self.trailing_stop_active:
+            return False
+        return self.current_pnl_pct <= self.trailing_stop_level_pct
+
+    def update_price(
+        self,
+        price: float,
+        underlying: float | None = None,
+        current_velocity_direction: Literal["up", "down", "flat"] | None = None,
+    ) -> str | None:
         """Update current price and check exit conditions.
 
         Args:
             price: Current option price
             underlying: Current underlying price (optional)
+            current_velocity_direction: Current momentum direction for reversal check
 
         Returns:
             Exit reason if exit triggered, None otherwise
@@ -117,11 +140,44 @@ class ScalpPosition:
         if self.current_pnl_pct < self.max_drawdown_pct:
             self.max_drawdown_pct = self.current_pnl_pct
 
+        # Update trailing stop
+        if not self.trailing_stop_active:
+            # Activate trailing stop once we hit activation threshold
+            if self.current_pnl_pct >= self.trailing_stop_activation_pct:
+                self.trailing_stop_active = True
+                self.trailing_stop_level_pct = self.max_gain_pct - self.trailing_stop_distance_pct
+                logger.info(
+                    f"[TRAIL] Trailing stop activated at {self.max_gain_pct:.1f}%, "
+                    f"trail level: {self.trailing_stop_level_pct:.1f}%"
+                )
+        else:
+            # Update trail level as price makes new highs
+            new_trail_level = self.max_gain_pct - self.trailing_stop_distance_pct
+            if new_trail_level > self.trailing_stop_level_pct:
+                self.trailing_stop_level_pct = new_trail_level
+                logger.debug(f"[TRAIL] Trail level raised to {self.trailing_stop_level_pct:.1f}%")
+
         # Check exit conditions in order of priority
+        # 1. Momentum reversal (thesis dead - exit fast)
+        if current_velocity_direction and current_velocity_direction != "flat":
+            if self.entry_velocity_direction == "up" and current_velocity_direction == "down":
+                return "momentum_reversal"
+            if self.entry_velocity_direction == "down" and current_velocity_direction == "up":
+                return "momentum_reversal"
+
+        # 2. Take profit (quick win)
         if self.should_exit_profit:
             return "take_profit"
+
+        # 3. Trailing stop (lock in gains)
+        if self.should_exit_trailing_stop:
+            return "trailing_stop"
+
+        # 4. Stop loss (hard floor)
         if self.should_exit_loss:
             return "stop_loss"
+
+        # 5. Time stop (don't hold stale positions)
         if self.should_exit_time:
             return "time_exit"
 
@@ -152,6 +208,11 @@ class ScalpPosition:
             "hold_seconds": self.hold_seconds,
             "max_gain_pct": round(self.max_gain_pct, 2),
             "max_drawdown_pct": round(self.max_drawdown_pct, 2),
+            # Trailing stop
+            "trailing_stop_active": self.trailing_stop_active,
+            "trailing_stop_level_pct": round(self.trailing_stop_level_pct, 2),
+            # Momentum reversal
+            "entry_velocity_direction": self.entry_velocity_direction,
         }
 
 
@@ -247,6 +308,8 @@ class ScalpExecutor:
         on_execution: Callable[[ScalpExecutionResult], Awaitable[None]] | None = None,
         on_exit: Callable[[ScalpExitResult], Awaitable[None]] | None = None,
         on_update: Callable[[ScalpPosition], Awaitable[None]] | None = None,
+        velocity_trackers: dict[str, "PriceVelocityTracker"] | None = None,
+        momentum_window_seconds: int = 15,
     ):
         """Initialize the scalp executor.
 
@@ -256,12 +319,16 @@ class ScalpExecutor:
             on_execution: Callback when scalp is opened
             on_exit: Callback when scalp is closed
             on_update: Callback on position price updates
+            velocity_trackers: Per-symbol velocity trackers for momentum reversal exits
+            momentum_window_seconds: Window for velocity calculations
         """
         self.trader = trader
         self.config = config or ScalpExecutorConfig()
         self.on_execution = on_execution
         self.on_exit = on_exit
         self.on_update = on_update
+        self.velocity_trackers = velocity_trackers or {}
+        self.momentum_window_seconds = momentum_window_seconds
 
         # Track open scalp positions
         self._positions: dict[str, ScalpPosition] = {}  # signal_id -> position
@@ -274,6 +341,139 @@ class ScalpExecutor:
         self._total_trades = 0
         self._winning_trades = 0
         self._total_pnl = 0.0
+
+        # Velocity-scaled position sizing state
+        self._daily_pnl = 0.0  # Track P&L for the day
+        self._daily_starting_equity: float | None = None
+        self._consecutive_losses = 0  # Count of consecutive losses
+        self._trading_halted = False  # If daily loss limit hit
+        self._last_reset_date: date | None = None  # For resetting daily stats
+
+        # Position sizing config
+        self._max_risk_pct = 5.0  # Max risk per trade
+        self._daily_loss_limit_pct = 10.0  # Stop trading if hit
+        self._loss_streak_threshold = 3  # Consecutive losses to reduce sizing
+
+    def _reset_daily_stats_if_needed(self) -> None:
+        """Reset daily stats at start of new trading day."""
+        today = date.today()
+        if self._last_reset_date != today:
+            self._daily_pnl = 0.0
+            self._daily_starting_equity = None
+            self._trading_halted = False
+            self._last_reset_date = today
+            logger.info("[SCALP] Daily stats reset for new trading day")
+
+    def _get_risk_pct_for_velocity(self, velocity_pct: float) -> float:
+        """Get risk percentage based on velocity magnitude.
+
+        Higher velocity = higher conviction = larger position.
+
+        Args:
+            velocity_pct: Absolute velocity percentage
+
+        Returns:
+            Risk percentage (2-5%)
+        """
+        abs_vel = abs(velocity_pct)
+
+        # Velocity-scaled risk tiers
+        if abs_vel >= 0.80:
+            base_risk = 5.0
+        elif abs_vel >= 0.60:
+            base_risk = 4.0
+        elif abs_vel >= 0.40:
+            base_risk = 3.0
+        else:  # 0.30-0.40%
+            base_risk = 2.0
+
+        # Apply consecutive loss reduction
+        if self._consecutive_losses >= self._loss_streak_threshold:
+            base_risk = 2.0  # Revert to minimum until a win
+            logger.info(
+                f"[SCALP] Reduced to {base_risk}% risk due to {self._consecutive_losses} consecutive losses"
+            )
+
+        # Cap at max risk
+        return min(base_risk, self._max_risk_pct)
+
+    def _calculate_position_size(
+        self,
+        velocity_pct: float,
+        entry_price: float,
+        stop_loss_pct: float,
+    ) -> tuple[int, float]:
+        """Calculate position size based on velocity and risk management.
+
+        Args:
+            velocity_pct: Signal velocity percentage
+            entry_price: Option entry price
+            stop_loss_pct: Stop loss percentage for the trade
+
+        Returns:
+            Tuple of (contracts, risk_pct_used)
+        """
+        # Get account equity
+        try:
+            account = self.trader.get_account()
+            equity = account.equity
+
+            # Track starting equity for daily P&L
+            if self._daily_starting_equity is None:
+                self._daily_starting_equity = equity
+        except Exception as e:
+            logger.warning(f"[SCALP] Failed to get account equity: {e}, using default 1 contract")
+            return 1, 2.0
+
+        # Get risk percentage based on velocity
+        risk_pct = self._get_risk_pct_for_velocity(velocity_pct)
+
+        # Calculate risk amount in dollars
+        risk_amount = equity * (risk_pct / 100)
+
+        # Calculate risk per contract: entry * stop_loss_pct * 100 shares
+        risk_per_contract = entry_price * (stop_loss_pct / 100) * 100
+
+        if risk_per_contract <= 0:
+            logger.warning("[SCALP] Invalid risk per contract, using 1 contract")
+            return 1, risk_pct
+
+        # Calculate contracts
+        contracts = int(risk_amount / risk_per_contract)
+
+        # Enforce minimum and maximum
+        contracts = max(1, min(contracts, 100))  # Min 1, max 100
+
+        return contracts, risk_pct
+
+    def _check_daily_loss_limit(self) -> bool:
+        """Check if daily loss limit has been hit.
+
+        Returns:
+            True if trading should continue, False if halted
+        """
+        if self._trading_halted:
+            return False
+
+        if self._daily_starting_equity is None:
+            return True
+
+        try:
+            account = self.trader.get_account()
+            current_equity = account.equity
+            daily_pnl_pct = ((current_equity - self._daily_starting_equity) / self._daily_starting_equity) * 100
+
+            if daily_pnl_pct <= -self._daily_loss_limit_pct:
+                self._trading_halted = True
+                logger.warning(
+                    f"[SCALP] DAILY LOSS LIMIT HIT: {daily_pnl_pct:.1f}% "
+                    f"(limit: -{self._daily_loss_limit_pct}%). Trading halted for today."
+                )
+                return False
+        except Exception as e:
+            logger.warning(f"[SCALP] Failed to check daily P&L: {e}")
+
+        return True
 
     async def execute_signal(self, signal: ScalpSignal) -> ScalpExecutionResult:
         """Execute a scalp signal by opening a position.
@@ -291,6 +491,17 @@ class ScalpExecutor:
                 error="Scalp execution disabled",
             )
 
+        # Reset daily stats if new day
+        self._reset_daily_stats_if_needed()
+
+        # Check daily loss limit
+        if not self._check_daily_loss_limit():
+            return ScalpExecutionResult(
+                success=False,
+                signal=signal,
+                error="Daily loss limit reached - trading halted",
+            )
+
         # Check position limit
         if len(self._positions) >= self.config.max_concurrent_scalps:
             return ScalpExecutionResult(
@@ -301,12 +512,25 @@ class ScalpExecutor:
 
         # Calculate order details
         occ_symbol = signal.option_symbol
-        contracts = signal.suggested_contracts
+
+        # Use velocity-scaled position sizing
+        contracts, risk_pct = self._calculate_position_size(
+            velocity_pct=signal.velocity_pct,
+            entry_price=signal.ask_price,
+            stop_loss_pct=signal.stop_loss_pct,
+        )
+
+        # Log position sizing decision
+        logger.info(
+            f"[SCALP] Signal velocity={abs(signal.velocity_pct):.2f}%, "
+            f"using {risk_pct:.0f}% risk ({contracts} contracts)"
+        )
 
         # Use ask price for buys (with optional limit offset)
         if self.config.use_limit_orders:
             mid = (signal.bid_price + signal.ask_price) / 2
-            limit_price = mid * (1 + self.config.limit_offset_pct / 100)
+            # Round to 2 decimal places - Alpaca requires this for options
+            limit_price = round(mid * (1 + self.config.limit_offset_pct / 100), 2)
         else:
             limit_price = None
 
@@ -364,6 +588,12 @@ class ScalpExecutor:
         # Apply slippage estimate
         fill_price *= (1 + self.config.slippage_pct / 100)
 
+        # Determine entry velocity direction from signal type
+        # SCALP_CALL = entered on upward momentum, SCALP_PUT = entered on downward momentum
+        entry_direction: Literal["up", "down"] = (
+            "up" if signal.signal_type == "SCALP_CALL" else "down"
+        )
+
         # Create position
         position = ScalpPosition(
             signal_id=signal.id,
@@ -382,7 +612,9 @@ class ScalpExecutor:
             contracts=contracts,
             take_profit_pct=signal.take_profit_pct,
             stop_loss_pct=signal.stop_loss_pct,
-            max_hold_seconds=signal.max_hold_minutes * 60,
+            # Handle None max_hold_minutes (means no time limit - use 24 hours as "unlimited")
+            max_hold_seconds=(signal.max_hold_minutes * 60) if signal.max_hold_minutes else 86400,
+            entry_velocity_direction=entry_direction,
             current_price=fill_price,
             entry_order_id=order_result.order_id,
         )
@@ -476,8 +708,19 @@ class ScalpExecutor:
             if not current_price:
                 continue
 
+            # Get current velocity direction for momentum reversal check
+            current_velocity_direction: Literal["up", "down", "flat"] | None = None
+            tracker = self.velocity_trackers.get(position.symbol)
+            if tracker:
+                velocity = tracker.get_velocity(self.momentum_window_seconds)
+                if velocity:
+                    current_velocity_direction = velocity.direction
+
             # Update and check exit
-            exit_reason = position.update_price(current_price)
+            exit_reason = position.update_price(
+                current_price,
+                current_velocity_direction=current_velocity_direction,
+            )
 
             # Callback for position updates
             if self.on_update:
@@ -546,7 +789,26 @@ class ScalpExecutor:
         # Update statistics
         if pnl_dollars > 0:
             self._winning_trades += 1
+            # Reset consecutive losses on a win
+            if self._consecutive_losses > 0:
+                logger.info(f"[SCALP] Win breaks {self._consecutive_losses}-loss streak, resetting to full sizing")
+            self._consecutive_losses = 0
+        else:
+            # Track consecutive losses
+            self._consecutive_losses += 1
+            if self._consecutive_losses >= self._loss_streak_threshold:
+                logger.warning(
+                    f"[SCALP] {self._consecutive_losses} consecutive losses - "
+                    f"reverting to 2% sizing until a win"
+                )
+
         self._total_pnl += pnl_dollars
+        self._daily_pnl += pnl_dollars
+
+        # Log daily P&L status
+        if self._daily_starting_equity:
+            daily_pnl_pct = (self._daily_pnl / self._daily_starting_equity) * 100
+            logger.info(f"[SCALP] Daily P&L: ${self._daily_pnl:+.2f} ({daily_pnl_pct:+.2f}%)")
 
         # Remove from tracking
         del self._positions[position.signal_id]
@@ -614,6 +876,10 @@ class ScalpExecutor:
             if self._total_trades > 0
             else 0.0
         )
+        daily_pnl_pct = 0.0
+        if self._daily_starting_equity and self._daily_starting_equity > 0:
+            daily_pnl_pct = (self._daily_pnl / self._daily_starting_equity) * 100
+
         return {
             "total_trades": self._total_trades,
             "winning_trades": self._winning_trades,
@@ -621,4 +887,9 @@ class ScalpExecutor:
             "win_rate": round(win_rate, 3),
             "total_pnl": round(self._total_pnl, 2),
             "open_positions": len(self._positions),
+            # Daily tracking
+            "daily_pnl": round(self._daily_pnl, 2),
+            "daily_pnl_pct": round(daily_pnl_pct, 2),
+            "consecutive_losses": self._consecutive_losses,
+            "trading_halted": self._trading_halted,
         }

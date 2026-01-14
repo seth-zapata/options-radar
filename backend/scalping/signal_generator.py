@@ -206,9 +206,15 @@ class ScalpSignalGenerator:
         # Get current velocity
         velocity = self.velocity.get_velocity(self.config.momentum_window_seconds)
         if velocity is None:
+            logger.debug(f"[{self.symbol}] No velocity data (need 2+ prices in {self.config.momentum_window_seconds}s window)")
             return None
 
         velocity_pct = velocity.change_pct
+
+        # Sanity check: ignore obviously bogus velocity (data errors)
+        if abs(velocity_pct) > 50:
+            logger.warning(f"[{self.symbol}] Ignoring bogus velocity {velocity_pct:+.1f}% (likely data error)")
+            return None
 
         # Get aggregate volume ratio (simplified - use total volume)
         volume_ratio = 1.0  # Default if no volume data
@@ -291,6 +297,7 @@ class ScalpSignalGenerator:
         # Require volume confirmation (relaxed for now since volume data may be sparse)
         # In live trading, this would be more strict
         if volume_ratio < self.config.volume_spike_ratio * 0.5:  # Relaxed threshold
+            logger.info(f"[{self.symbol}] Momentum {velocity_pct:+.2f}% but volume too low: {volume_ratio:.2f} < {self.config.volume_spike_ratio * 0.5:.2f}")
             return None
 
         # Determine direction
@@ -303,6 +310,26 @@ class ScalpSignalGenerator:
         option = self._select_option(underlying_price, option_type)
 
         if option is None:
+            # Detailed logging: why no option found?
+            opts_of_type = [o for o in self._available_options if o.get("option_type") == option_type]
+            if not opts_of_type:
+                logger.info(f"[{self.symbol}] Momentum {velocity_pct:+.2f}% but NO {option_type} options in available list")
+            else:
+                # Sample first few to diagnose
+                samples = opts_of_type[:3]
+                sample_info = []
+                for o in samples:
+                    delta = abs(o.get("delta", 0))
+                    ask = o.get("ask_px", 0)
+                    bid = o.get("bid_px", 0)
+                    mid = (bid + ask) / 2 if bid > 0 and ask > 0 else 0
+                    spread_pct = ((ask - bid) / mid * 100) if mid > 0 else 999
+                    dte = o.get("dte", -1)
+                    sample_info.append(f"DTE={dte} δ={delta:.2f} ask=${ask:.2f} spread={spread_pct:.1f}%")
+                logger.info(
+                    f"[{self.symbol}] Momentum {velocity_pct:+.2f}% but no valid {option_type} option. "
+                    f"{len(opts_of_type)} available, samples: {sample_info}"
+                )
             return None
 
         # Higher confidence for stronger momentum

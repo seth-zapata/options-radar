@@ -455,9 +455,16 @@ class GatingPipeline:
                             f"[LIQUIDITY_ABSTAIN] {ctx.underlying_symbol}: "
                             f"{gate.name} failed - OI={ctx.open_interest}, Vol={ctx.volume}"
                         )
-                    logger.info(
-                        f"Hard gate '{gate.name}' failed: {result.message}"
-                    )
+                    # Demote staleness gates to debug (too noisy during normal operation)
+                    staleness_gates = ("quote_fresh", "greeks_fresh", "underlying_price_fresh")
+                    if gate.name in staleness_gates:
+                        logger.debug(
+                            f"Hard gate '{gate.name}' failed: {result.message}"
+                        )
+                    else:
+                        logger.info(
+                            f"Hard gate '{gate.name}' failed: {result.message}"
+                        )
                     return self._create_abstain_result(
                         ctx, all_results, soft_failures, result, stage
                     )

@@ -210,9 +210,24 @@ class DataAggregator:
     def update_underlying(self, underlying: UnderlyingData) -> None:
         """Update underlying data (price, IV rank).
 
+        Preserves existing price if new data has price=0 (e.g., from IV-only updates).
+
         Args:
             underlying: New underlying data
         """
+        existing = self._underlyings.get(underlying.symbol)
+
+        # If new data has price=0 but we have an existing price, preserve it
+        # This handles IV rank updates from ORATS which don't include price
+        if existing and underlying.price == 0 and existing.price > 0:
+            underlying = UnderlyingData(
+                symbol=underlying.symbol,
+                price=existing.price,  # Preserve existing price
+                iv_rank=underlying.iv_rank,
+                iv_percentile=underlying.iv_percentile,
+                timestamp=underlying.timestamp,
+            )
+
         self._underlyings[underlying.symbol] = underlying
 
         if self.on_underlying_update:

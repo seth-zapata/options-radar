@@ -35,6 +35,16 @@ import time
 from pathlib import Path
 
 
+def get_venv_python():
+    """Get the path to the venv Python executable."""
+    project_root = Path(__file__).parent.absolute()
+    venv_python = project_root / "venv" / "bin" / "python"
+    if venv_python.exists():
+        return str(venv_python)
+    # Fallback to current interpreter
+    return sys.executable
+
+
 MODE_PRESETS = {
     "mock": {
         "MOCK_DATA": "true",
@@ -373,6 +383,7 @@ Examples:
     if not args.backend_only:
         print(f"  FRONTEND:      http://localhost:{args.frontend_port}")
     print(f"  HOT RELOAD:    {use_reload}")
+    print(f"  PYTHON:        {get_venv_python()}")
     print("=" * 60)
 
     if args.mode == "live":
@@ -384,9 +395,10 @@ Examples:
     elif args.mode == "paper":
         print("\n📝 Paper trading mode - requires market hours (9:30 AM - 4:00 PM ET)")
 
-    # Build uvicorn command
+    # Build uvicorn command (use venv Python)
+    venv_python = get_venv_python()
     backend_cmd = [
-        sys.executable, "-m", "uvicorn",
+        venv_python, "-m", "uvicorn",
         "backend.main:app",
         "--host", "0.0.0.0",
         "--port", str(args.port),
