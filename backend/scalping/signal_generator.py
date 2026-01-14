@@ -58,7 +58,7 @@ class ScalpSignal:
     entry_price: float  # Expected fill (usually ask for buy)
     spread_pct: float
 
-    # Risk management (from config)
+    # Risk management (from config) - fields with defaults must come last
     take_profit_pct: float = 30.0
     stop_loss_pct: float = 15.0
     max_hold_minutes: int = 15
@@ -67,6 +67,10 @@ class ScalpSignal:
     confidence: int = 50  # 0-100
     suggested_contracts: int = 1
     max_position_value: float = 500.0
+
+    # Threshold info (for analysis)
+    threshold_used: float = 0.0  # The threshold that was crossed
+    velocity_margin: float = 0.0  # How much velocity exceeded threshold
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -79,6 +83,8 @@ class ScalpSignal:
             "underlying_price": self.underlying_price,
             "velocity_pct": round(self.velocity_pct, 3),
             "volume_ratio": round(self.volume_ratio, 2),
+            "threshold_used": round(self.threshold_used, 3),
+            "velocity_margin": round(self.velocity_margin, 3),
             "option_symbol": self.option_symbol,
             "strike": self.strike,
             "expiry": self.expiry,
@@ -288,10 +294,23 @@ class ScalpSignalGenerator:
     ) -> ScalpSignal | None:
         """Check for momentum burst signal.
 
-        Triggers when price velocity exceeds threshold with volume confirmation.
+        Triggers when price velocity exceeds asymmetric threshold with volume confirmation.
+        PUT signals trigger on lower threshold (panic moves fast).
+        CALL signals trigger on higher threshold (rallies need confirmation).
         """
-        # Require sufficient momentum
-        if abs(velocity_pct) < self.config.momentum_threshold_pct:
+        # Asymmetric thresholds based on direction
+        abs_v = abs(velocity_pct)
+        if velocity_pct < 0:  # Negative velocity -> PUT signal
+            threshold = self.config.momentum_threshold_put_pct
+            direction: Literal["SCALP_CALL", "SCALP_PUT"] = "SCALP_PUT"
+            option_type = "P"
+        else:  # Positive velocity -> CALL signal
+            threshold = self.config.momentum_threshold_call_pct
+            direction = "SCALP_CALL"
+            option_type = "C"
+
+        # Require sufficient momentum (asymmetric)
+        if abs_v < threshold:
             return None
 
         # Require volume confirmation (relaxed for now since volume data may be sparse)
@@ -299,12 +318,6 @@ class ScalpSignalGenerator:
         if volume_ratio < self.config.volume_spike_ratio * 0.5:  # Relaxed threshold
             logger.info(f"[{self.symbol}] Momentum {velocity_pct:+.2f}% but volume too low: {volume_ratio:.2f} < {self.config.volume_spike_ratio * 0.5:.2f}")
             return None
-
-        # Determine direction
-        direction: Literal["SCALP_CALL", "SCALP_PUT"] = (
-            "SCALP_CALL" if velocity_pct > 0 else "SCALP_PUT"
-        )
-        option_type = "C" if velocity_pct > 0 else "P"
 
         # Select option
         option = self._select_option(underlying_price, option_type)
@@ -343,6 +356,9 @@ class ScalpSignalGenerator:
             )
             return None
 
+        # Calculate velocity margin (how much over threshold)
+        velocity_margin = abs_v - threshold
+
         return self._create_signal(
             current_time=current_time,
             underlying_price=underlying_price,
@@ -352,6 +368,8 @@ class ScalpSignalGenerator:
             direction=direction,
             option=option,
             confidence=confidence,
+            threshold_used=threshold,
+            velocity_margin=velocity_margin,
         )
 
     def _check_technical_signals(
@@ -552,6 +570,8 @@ class ScalpSignalGenerator:
         direction: Literal["SCALP_CALL", "SCALP_PUT"],
         option: dict,
         confidence: int = 50,
+        threshold_used: float = 0.0,
+        velocity_margin: float = 0.0,
     ) -> ScalpSignal:
         """Create a ScalpSignal from components."""
         bid = option["bid_px"]
@@ -572,6 +592,8 @@ class ScalpSignalGenerator:
             underlying_price=underlying_price,
             velocity_pct=velocity_pct,
             volume_ratio=volume_ratio,
+            threshold_used=threshold_used,
+            velocity_margin=velocity_margin,
             option_symbol=option["symbol"],
             strike=option["strike"],
             expiry=option.get("expiry", ""),

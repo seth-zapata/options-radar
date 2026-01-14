@@ -740,11 +740,37 @@ async def gate_evaluation_loop() -> None:
                         # Log velocity every 10 seconds for threshold tuning
                         if velocity and int(now.timestamp()) % 10 == 0:
                             v_pct = velocity.change_pct
-                            trigger = "✓ TRIGGER" if abs(v_pct) >= scalp_config.momentum_threshold_pct else ""
+                            abs_v = abs(v_pct)
+
+                            # Asymmetric threshold check
+                            put_threshold = scalp_config.momentum_threshold_put_pct
+                            call_threshold = scalp_config.momentum_threshold_call_pct
+
+                            # Check if would trigger based on direction
+                            if v_pct < 0:  # Negative velocity -> PUT signal
+                                would_trigger_put = abs_v >= put_threshold
+                                trigger = "PUT TRIGGER" if would_trigger_put else ""
+                                put_status = f"PUT {put_threshold}%: {'yes' if would_trigger_put else 'no'}"
+                                call_status = f"CALL {call_threshold}%: n/a (wrong direction)"
+                            else:  # Positive velocity -> CALL signal
+                                would_trigger_call = abs_v >= call_threshold
+                                trigger = "CALL TRIGGER" if would_trigger_call else ""
+                                put_status = f"PUT {put_threshold}%: n/a (wrong direction)"
+                                call_status = f"CALL {call_threshold}%: {'yes' if would_trigger_call else 'no'}"
+
+                            # Also show what other thresholds would have triggered
+                            thresholds = [0.80, 0.60, 0.50, 0.40, 0.30, 0.20]
+                            would_trigger_at = [f"{t}%:{'yes' if abs_v >= t else 'no'}" for t in thresholds]
+
                             logger.info(
                                 f"[SCALP-DIAG] {symbol} ${underlying.price:.2f} | "
-                                f"velocity={v_pct:+.3f}% ({velocity.data_points}pts/{scalp_config.momentum_window_seconds}s) "
-                                f"threshold={scalp_config.momentum_threshold_pct}% {trigger}"
+                                f"velocity={v_pct:+.3f}% ({velocity.data_points}pts/{scalp_config.momentum_window_seconds}s) {trigger}"
+                            )
+                            logger.info(
+                                f"  {put_status} | {call_status}"
+                            )
+                            logger.info(
+                                f"  other thresholds: {' '.join(would_trigger_at)}"
                             )
 
                         # Update technical scalper (VWAP, S/R levels)
@@ -804,12 +830,28 @@ async def gate_evaluation_loop() -> None:
                             logger.warning(f"[SCALP] Ignoring bogus velocity {velocity.change_pct:+.1f}%")
                             velocity = None
 
-                        # Log when momentum threshold exceeded
-                        if velocity and abs(velocity.change_pct) >= scalp_config.momentum_threshold_pct:
+                        # Check asymmetric thresholds based on direction
+                        threshold_exceeded = False
+                        velocity_margin = 0.0
+                        if velocity:
+                            v_pct = velocity.change_pct
+                            abs_v = abs(v_pct)
+                            if v_pct < 0:  # Negative velocity -> PUT
+                                threshold = scalp_config.momentum_threshold_put_pct
+                                threshold_exceeded = abs_v >= threshold
+                                velocity_margin = abs_v - threshold  # How much over threshold
+                            else:  # Positive velocity -> CALL
+                                threshold = scalp_config.momentum_threshold_call_pct
+                                threshold_exceeded = abs_v >= threshold
+                                velocity_margin = abs_v - threshold
+
+                        # Log when asymmetric threshold exceeded
+                        if velocity and threshold_exceeded:
                             direction = "PUT" if velocity.change_pct < 0 else "CALL"
                             logger.info(
                                 f"[SCALP-TRIGGER] {symbol} {direction} momentum={velocity.change_pct:+.2f}% "
-                                f"({len(scalp_options)} options available)"
+                                f"(threshold={threshold}%, margin=+{velocity_margin:.2f}%, "
+                                f"{len(scalp_options)} options available)"
                             )
 
                         # Evaluate for scalp signal
@@ -1311,9 +1353,11 @@ async def lifespan(app: FastAPI):
             # - Shorter time stop (exit stalled trades fast)
             scalp_config = ScalpConfig(
                 enabled=True,
-                # Signal generation - test config for more signals
-                momentum_threshold_pct=0.25,  # Lower threshold
-                momentum_window_seconds=60,  # Longer window to capture momentum
+                # Asymmetric thresholds (backtest: PUTs outperform CALLs)
+                # Panic drops fast (lower threshold), rallies slower (higher threshold)
+                momentum_threshold_put_pct=0.4,   # PUT: -0.4% velocity
+                momentum_threshold_call_pct=0.6,  # CALL: +0.6% velocity
+                momentum_window_seconds=30,  # Same window for both
                 volume_spike_ratio=1.3,  # Down from 1.5 (faster confirmation)
                 # Signal type toggles - only momentum_burst enabled
                 enable_vwap_bounce=False,  # 0-10% WR - disabled
@@ -1357,7 +1401,7 @@ async def lifespan(app: FastAPI):
             logger.info("=" * 60)
             logger.info("SCALPING MODULE ENABLED (intra-minute mode)")
             logger.info(f"  Symbols: {scalping_symbols}")
-            logger.info(f"  Momentum threshold: {scalp_config.momentum_threshold_pct}% in {scalp_config.momentum_window_seconds}s")
+            logger.info(f"  Momentum thresholds: PUT {scalp_config.momentum_threshold_put_pct}% / CALL {scalp_config.momentum_threshold_call_pct}% in {scalp_config.momentum_window_seconds}s")
             logger.info(f"  Volume spike: {scalp_config.volume_spike_ratio}x baseline")
             logger.info(f"  Take profit: {scalp_config.take_profit_pct}% / Stop loss: {scalp_config.stop_loss_pct}%")
             logger.info(f"  Time stop: {scalp_config.time_stop_minutes} min (exit stalled trades)")

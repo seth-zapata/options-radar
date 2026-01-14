@@ -34,8 +34,11 @@ class ScalpConfig:
         eval_interval_seconds: How often to check for signals (backtest)
         eval_interval_ms: How often to check for signals (live, 200ms default)
 
-        Momentum Detection:
-        momentum_threshold_pct: Min % move to trigger signal (0.5%)
+        Momentum Detection (Asymmetric Thresholds):
+        momentum_threshold_put_pct: Min % move for PUT signals (0.4%)
+            - Panic moves fast, catch early
+        momentum_threshold_call_pct: Min % move for CALL signals (0.6%)
+            - Rallies slower, need confirmation
         momentum_window_seconds: Time window for momentum calc (30s)
 
         Volume Confirmation:
@@ -73,9 +76,11 @@ class ScalpConfig:
     eval_interval_seconds: float = 1.0  # For backtesting
     eval_interval_ms: int = 200  # For live trading (200ms)
 
-    # Momentum thresholds
-    momentum_threshold_pct: float = 0.5  # 0.5% move triggers signal
-    momentum_window_seconds: int = 30  # Over 30 second window
+    # Asymmetric momentum thresholds (based on backtest: PUTs outperform CALLs)
+    # Panic drops fast (lower threshold), rallies slower (higher threshold)
+    momentum_threshold_put_pct: float = 0.4  # PUT: trigger on -0.4% velocity
+    momentum_threshold_call_pct: float = 0.6  # CALL: trigger on +0.6% velocity
+    momentum_window_seconds: int = 30  # Same window for both
 
     # Volume thresholds
     volume_spike_ratio: float = 1.5  # 1.5x normal volume required
@@ -194,7 +199,8 @@ def load_scalp_config_from_env() -> ScalpConfig:
         enabled=get_bool("SCALP_ENABLED", False),
         eval_interval_ms=get_int("SCALP_EVAL_INTERVAL_MS", 200),
         eval_interval_seconds=get_float("SCALP_EVAL_INTERVAL_MS", 200) / 1000,
-        momentum_threshold_pct=get_float("SCALP_MOMENTUM_THRESHOLD", 0.5),
+        momentum_threshold_put_pct=get_float("SCALP_MOMENTUM_THRESHOLD_PUT", 0.4),
+        momentum_threshold_call_pct=get_float("SCALP_MOMENTUM_THRESHOLD_CALL", 0.6),
         momentum_window_seconds=get_int("SCALP_MOMENTUM_WINDOW", 30),
         volume_spike_ratio=get_float("SCALP_VOLUME_SPIKE_RATIO", 1.5),
         target_delta=get_float("SCALP_TARGET_DELTA", 0.40),

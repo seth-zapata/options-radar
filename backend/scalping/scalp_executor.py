@@ -15,9 +15,11 @@ Designed for fast intraday scalping with:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
 if TYPE_CHECKING:
@@ -354,6 +356,188 @@ class ScalpExecutor:
         self._daily_loss_limit_pct = 10.0  # Stop trading if hit
         self._loss_streak_threshold = 3  # Consecutive losses to reduce sizing
 
+        # Trade log directory
+        self._trade_log_dir = Path("scalp_trades")
+        self._trade_log_dir.mkdir(exist_ok=True)
+
+    def _get_trade_log_path(self) -> Path:
+        """Get path to today's trade log file."""
+        today = date.today().isoformat()
+        return self._trade_log_dir / f"scalp_trades_{today}.json"
+
+    def _load_trade_log(self) -> dict[str, Any]:
+        """Load today's trade log or create empty structure."""
+        log_path = self._get_trade_log_path()
+        if log_path.exists():
+            try:
+                with open(log_path) as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError):
+                pass
+        return {
+            "date": date.today().isoformat(),
+            "trades": [],
+            "summary": {
+                "total_trades": 0,
+                "winning_trades": 0,
+                "total_pnl": 0.0,
+                "win_rate": 0.0,
+            },
+        }
+
+    def _save_trade_log(self, log: dict[str, Any]) -> None:
+        """Save trade log to file."""
+        log_path = self._get_trade_log_path()
+        try:
+            with open(log_path, "w") as f:
+                json.dump(log, f, indent=2)
+            logger.debug(f"[SCALP] Trade log saved to {log_path}")
+        except IOError as e:
+            logger.error(f"[SCALP] Failed to save trade log: {e}")
+
+    def _log_trade_entry(self, position: ScalpPosition, signal: "ScalpSignal") -> None:
+        """Log a trade entry to the daily trade file."""
+        log = self._load_trade_log()
+
+        # Determine market time category (useful for analysis)
+        entry_time = position.entry_time
+        hour = entry_time.hour
+        minute = entry_time.minute
+        minutes_from_open = (hour - 9) * 60 + (minute - 30)  # Market opens 9:30 ET
+        if minutes_from_open < 30:
+            market_period = "open"  # First 30 min
+        elif minutes_from_open > 360:  # 6 hours = 15:30
+            market_period = "close"  # Last 30 min
+        else:
+            market_period = "mid"  # Middle of day
+
+        entry = {
+            # Identification
+            "signal_id": position.signal_id,
+            "entry_time": entry_time.isoformat(),
+            "market_period": market_period,  # open/mid/close - valuable for analysis
+            # Position details
+            "symbol": position.symbol,
+            "option_symbol": position.option_symbol,
+            "signal_type": position.signal_type,
+            "trigger": position.trigger,
+            "strike": position.strike,
+            "expiry": position.expiry,
+            "dte": position.dte,
+            "delta": round(position.delta, 3),
+            "contracts": position.contracts,
+            # Pricing
+            "entry_price": round(position.entry_price, 2),
+            "bid_price": round(signal.bid_price, 2),
+            "ask_price": round(signal.ask_price, 2),
+            "spread_pct": round(signal.spread_pct, 2),
+            # Underlying state
+            "underlying_at_entry": round(position.underlying_at_entry, 2),
+            # Momentum metrics (key for threshold tuning)
+            "velocity_pct": round(signal.velocity_pct, 3),
+            "threshold_used": round(signal.threshold_used, 3),
+            "velocity_margin": round(signal.velocity_margin, 3),
+            "volume_ratio": round(signal.volume_ratio, 2),
+            # Risk params
+            "confidence": position.confidence,
+            "take_profit_pct": position.take_profit_pct,
+            "stop_loss_pct": position.stop_loss_pct,
+            # Exit fields will be filled in later
+            "exit_time": None,
+            "exit_price": None,
+            "exit_reason": None,
+            "pnl_dollars": None,
+            "pnl_pct": None,
+            "hold_seconds": None,
+            "max_gain_pct": None,
+            "max_drawdown_pct": None,
+        }
+        log["trades"].append(entry)
+        log["summary"]["total_trades"] = len(log["trades"])
+        self._save_trade_log(log)
+
+    def _log_trade_exit(self, result: "ScalpExitResult") -> None:
+        """Update trade entry with exit information."""
+        log = self._load_trade_log()
+
+        # Find the trade entry by signal_id
+        for trade in log["trades"]:
+            if trade["signal_id"] == result.position.signal_id:
+                trade["exit_time"] = datetime.now(timezone.utc).isoformat()
+                trade["exit_price"] = round(result.exit_price, 2)
+                trade["exit_reason"] = result.exit_reason
+                trade["pnl_dollars"] = round(result.pnl_dollars, 2)
+                trade["pnl_pct"] = round(result.pnl_pct, 2)
+                trade["hold_seconds"] = result.hold_seconds
+                trade["max_gain_pct"] = round(result.position.max_gain_pct, 2)
+                trade["max_drawdown_pct"] = round(result.position.max_drawdown_pct, 2)
+                break
+
+        # Update summary with comprehensive metrics for analysis
+        completed_trades = [t for t in log["trades"] if t["exit_time"] is not None]
+        winning_trades = [t for t in completed_trades if t["pnl_dollars"] and t["pnl_dollars"] > 0]
+        total_pnl = sum(t["pnl_dollars"] or 0 for t in completed_trades)
+
+        # Basic stats
+        log["summary"]["total_trades"] = len(log["trades"])
+        log["summary"]["completed_trades"] = len(completed_trades)
+        log["summary"]["winning_trades"] = len(winning_trades)
+        log["summary"]["total_pnl"] = round(total_pnl, 2)
+        log["summary"]["win_rate"] = round(len(winning_trades) / len(completed_trades) * 100, 1) if completed_trades else 0
+
+        if completed_trades:
+            # Averages for threshold tuning
+            velocity_margins = [t.get("velocity_margin", 0) for t in completed_trades]
+            hold_times = [t.get("hold_seconds", 0) for t in completed_trades if t.get("hold_seconds")]
+            pnls = [t["pnl_dollars"] for t in completed_trades if t["pnl_dollars"] is not None]
+
+            log["summary"]["avg_velocity_margin"] = round(sum(velocity_margins) / len(velocity_margins), 3) if velocity_margins else 0
+            log["summary"]["avg_hold_seconds"] = round(sum(hold_times) / len(hold_times), 1) if hold_times else 0
+            log["summary"]["avg_pnl_per_trade"] = round(sum(pnls) / len(pnls), 2) if pnls else 0
+            log["summary"]["best_trade"] = round(max(pnls), 2) if pnls else 0
+            log["summary"]["worst_trade"] = round(min(pnls), 2) if pnls else 0
+
+            # Win rate by signal type (CALL vs PUT)
+            calls = [t for t in completed_trades if t.get("signal_type") == "SCALP_CALL"]
+            puts = [t for t in completed_trades if t.get("signal_type") == "SCALP_PUT"]
+            call_wins = len([t for t in calls if t["pnl_dollars"] and t["pnl_dollars"] > 0])
+            put_wins = len([t for t in puts if t["pnl_dollars"] and t["pnl_dollars"] > 0])
+
+            log["summary"]["call_trades"] = len(calls)
+            log["summary"]["call_win_rate"] = round(call_wins / len(calls) * 100, 1) if calls else 0
+            log["summary"]["put_trades"] = len(puts)
+            log["summary"]["put_win_rate"] = round(put_wins / len(puts) * 100, 1) if puts else 0
+
+            # Win rate by market period
+            for period in ["open", "mid", "close"]:
+                period_trades = [t for t in completed_trades if t.get("market_period") == period]
+                period_wins = len([t for t in period_trades if t["pnl_dollars"] and t["pnl_dollars"] > 0])
+                log["summary"][f"{period}_trades"] = len(period_trades)
+                log["summary"][f"{period}_win_rate"] = round(period_wins / len(period_trades) * 100, 1) if period_trades else 0
+
+            # Exit reason breakdown
+            exit_reasons = {}
+            for t in completed_trades:
+                reason = t.get("exit_reason", "unknown")
+                if reason not in exit_reasons:
+                    exit_reasons[reason] = {"count": 0, "wins": 0, "total_pnl": 0}
+                exit_reasons[reason]["count"] += 1
+                if t["pnl_dollars"] and t["pnl_dollars"] > 0:
+                    exit_reasons[reason]["wins"] += 1
+                exit_reasons[reason]["total_pnl"] += t["pnl_dollars"] or 0
+
+            log["summary"]["by_exit_reason"] = {
+                reason: {
+                    "count": data["count"],
+                    "win_rate": round(data["wins"] / data["count"] * 100, 1) if data["count"] > 0 else 0,
+                    "total_pnl": round(data["total_pnl"], 2),
+                }
+                for reason, data in exit_reasons.items()
+            }
+
+        self._save_trade_log(log)
+        logger.info(f"[SCALP] Trade logged: {result.position.option_symbol} P&L=${result.pnl_dollars:+.2f}")
+
     def _reset_daily_stats_if_needed(self) -> None:
         """Reset daily stats at start of new trading day."""
         today = date.today()
@@ -623,6 +807,9 @@ class ScalpExecutor:
         self._positions[signal.id] = position
         self._total_trades += 1
 
+        # Log trade entry to daily file
+        self._log_trade_entry(position, signal)
+
         logger.info(
             f"[SCALP-EXEC] Position opened: {signal.signal_type} "
             f"{contracts}x {occ_symbol} @ ${fill_price:.2f} "
@@ -822,6 +1009,9 @@ class ScalpExecutor:
             hold_seconds=position.hold_seconds,
             order_id=order_result.order_id,
         )
+
+        # Log trade exit to daily file
+        self._log_trade_exit(result)
 
         logger.info(
             f"[SCALP-EXIT] Closed {position.symbol}: "
