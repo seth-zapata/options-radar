@@ -288,7 +288,8 @@ class ScalpExecutorConfig:
     limit_offset_pct: float = 0.5  # Offset from mid for limit orders
     slippage_pct: float = 0.5  # Expected slippage for P&L calculations
     # Market close exit - force close positions before market closes to ensure fill
-    market_close_exit_minutes: int = 2  # Exit 2 minutes before 4pm ET (at 3:58 PM)
+    # This is a safety net - normal exits (TP/SL/reversal) should close positions well before this
+    market_close_exit_minutes: int = 1  # Exit 1 minute before 4pm ET (at 3:59 PM)
 
 
 class ScalpExecutor:
