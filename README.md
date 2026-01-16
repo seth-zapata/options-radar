@@ -90,6 +90,17 @@ python run.py --backtest /path/to/data --parallel --workers 8
 python scripts/run_full_year_backtest.py 2024
 ```
 
+### Backtest Results
+
+See [docs/SCALPING_BACKTEST_RESULTS.md](docs/SCALPING_BACKTEST_RESULTS.md) for comprehensive analysis.
+
+| Year | Return | Win Rate | Trades | Sharpe | Max DD |
+|------|--------|----------|--------|--------|--------|
+| 2022 (Bear) | +231.6% | 49.4% | 178 | 2.17 | -5.3% |
+| 2024 (Mixed) | +48.8% | 56.3% | 64 | 2.50 | -4.4% |
+
+Raw data: `backtest_results_repo/backtest_2022_baseline_momentum.json`, `backtest_results_repo/backtest_2024_baseline_momentum.json`
+
 ### Key Configuration (ScalpConfig)
 
 ```python
