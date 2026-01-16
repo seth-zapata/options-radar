@@ -130,8 +130,9 @@ def run_backtest(args):
         stop_loss_pct=15.0,
         max_hold_minutes=None,  # Allow overnight holds
         time_stop_minutes=5,  # Exit unprofitable trades after 5 min
-        # Signal generation
-        momentum_threshold_pct=0.5,
+        # Signal generation - asymmetric thresholds
+        momentum_threshold_put_pct=0.4,  # PUT: panic drops fast
+        momentum_threshold_call_pct=0.6,  # CALL: rallies need confirmation
         momentum_window_seconds=30,
     )
 
