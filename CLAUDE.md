@@ -225,7 +225,9 @@ if symbol not in self._subscribed_symbols:
 
 ## Current Implementation State
 
-### Completed Features
+### Two Trading Strategies
+
+**1. Regime-Based Strategy (Original)**
 - Real-time options streaming via Alpaca WebSocket
 - Regime detection from sentiment (Finnhub + Quiver)
 - 11-gate evaluation system
@@ -236,9 +238,47 @@ if symbol not in self._subscribed_symbols:
 - Simulation mode with mock data
 - Symbol switching (TSLA, NVDA, etc.)
 
+**2. Scalping Module (TSLA Momentum) - Active Development Focus**
+- High-frequency momentum strategy for TSLA options
+- Sub-second price velocity detection (30s window)
+- Asymmetric thresholds: PUT 0.4% / CALL 0.6%
+- 1-3 DTE options only (never 0DTE)
+- Multiple exit strategies: TP (+20%), SL (-15%), momentum reversal, time stop (5 min), market close
+- Trade logging to JSON per market day
+- Backtesting with DataBento historical data
+
+### Key Scalping Files
+
+| File | Purpose |
+|------|---------|
+| `scalping/config.py` | ScalpConfig with thresholds, DTE limits, exit params |
+| `scalping/signal_generator.py` | Momentum burst detection, option selection |
+| `scalping/scalp_executor.py` | Trade execution, exit monitoring, trade logging |
+| `scalping/velocity_tracker.py` | Price velocity calculation from tick data |
+| `scalping/scalp_backtester.py` | Backtesting engine with portfolio simulation |
+
+### Scalping Config Defaults
+
+```python
+ScalpConfig(
+    momentum_threshold_put_pct=0.4,   # PUT: trigger on -0.4% velocity
+    momentum_threshold_call_pct=0.6,  # CALL: trigger on +0.6% velocity
+    momentum_window_seconds=30,
+    min_dte=1,                        # Never 0DTE
+    max_dte=3,
+    take_profit_pct=20.0,
+    stop_loss_pct=15.0,
+    time_stop_minutes=5,
+    max_contract_price=3.00,
+    market_close_exit_minutes=1,      # Force exit at 3:59 PM ET
+)
+```
+
 ### Ready for Paper Trading
 All core functionality works during market hours with real data.
 Set `TRADING_MODE=paper` and ensure `.env` has Alpaca paper API keys.
+
+For scalping: `python run.py --mode paper --scalping`
 
 ---
 
