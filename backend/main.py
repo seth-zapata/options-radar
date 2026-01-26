@@ -1216,6 +1216,9 @@ async def greeks_polling_loop() -> None:
 
     logger.info("Starting Greeks polling loop (15s interval)")
 
+    # Import market hours checker
+    from backend.data.market_hours import check_market_hours
+
     first_poll = True
     while True:
         try:
@@ -1225,6 +1228,16 @@ async def greeks_polling_loop() -> None:
 
             if not subscription_manager:
                 continue
+
+            # Skip ORATS API calls when market is closed
+            try:
+                config = load_config()
+                market_status = await check_market_hours(config.alpaca)
+                if not market_status.is_open:
+                    logger.debug("Market closed, skipping ORATS polling")
+                    continue
+            except Exception as e:
+                logger.warning(f"Could not check market hours: {e}, proceeding with poll")
 
             symbol = subscription_manager.symbol
 
